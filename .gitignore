@@ -1,5 +1,7 @@
 # compiled output
 /dist
+# stale incremental cache if TS ever wrote next to tsconfig (safe to remove)
+tsconfig.build.tsbuildinfo
 /node_modules
 /build
 
@@ -58,3 +60,6 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 .yarn
 
 .yarn.lock
+
+# Local product images (use S3 in production)
+/uploads

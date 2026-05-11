@@ -1,0 +1,265 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum AuthProviderType {
+  GOOGLE
+  EMAIL
+  PHONE
+}
+
+enum CouponDiscountType {
+  PERCENT
+  FIXED
+}
+
+enum ProductAudience {
+  MEN
+  WOMEN
+  UNISEX
+}
+
+model Fabric {
+  id             String          @id @default(uuid())
+  slug           String          @unique
+  name           String
+  sortOrder      Int             @default(0)
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  productFabrics ProductFabric[]
+
+  @@index([isActive])
+  @@index([sortOrder])
+}
+
+model ProductFabric {
+  id        String  @id @default(uuid())
+  productId String
+  fabricId  String
+  percent   Int
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  fabric    Fabric  @relation(fields: [fabricId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, fabricId])
+  @@index([productId])
+  @@index([fabricId])
+}
+
+model ProductCategory {
+  id        String    @id @default(uuid())
+  slug      String    @unique
+  name      String
+  image     String?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  products  Product[]
+  couponLinks CouponCategory[]
+
+  @@index([isActive])
+}
+
+model User {
+  id            String         @id @default(uuid())
+  name          String
+  email         String?        @unique
+  phone         String?        @unique
+  profileImage  String?
+  password      String?
+  role          UserRole       @default(USER)
+  isVerified    Boolean        @default(false)
+  provider      AuthProviderType
+  refreshToken  String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  authProviders AuthProvider[]
+
+  @@index([role])
+}
+
+model Otp {
+  id         String   @id @default(uuid())
+  identifier String
+  otp        String
+  expiresAt  DateTime
+  isUsed     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([identifier, createdAt])
+  @@index([identifier, isUsed, expiresAt])
+}
+
+model AuthProvider {
+  id         String           @id @default(uuid())
+  userId     String
+  provider   AuthProviderType
+  providerId String
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@index([userId, provider])
+}
+
+// Maps to legacy `basePrice` / `imageUrl` columns. quantity = total stock (sum of variants when variants exist).
+model Product {
+  id            String           @id @default(uuid())
+  name          String
+  description   String?          @db.Text
+  price         Decimal          @map("basePrice") @db.Decimal(10, 2)
+  quantity      Int              @default(0)
+  audience      ProductAudience  @default(UNISEX)
+  color         String           @default("")
+  fabric        String           @default("")
+  /** 1–100 = percentage off list `price`; null = no discount */
+  discountPercent Int?
+  isAvailable   Boolean          @default(true)
+  categoryId    String?
+  category      ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  productTypeId String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  images        ProductImage[]
+  variants      ProductVariant[]
+  productFabrics ProductFabric[]
+  productMeasurementAttributes ProductMeasurementAttribute[]
+
+  @@index([categoryId])
+  @@index([isAvailable])
+  @@index([createdAt])
+  @@index([audience])
+}
+
+model ProductMeasurementAttribute {
+  id          String               @id @default(uuid())
+  productId   String
+  attributeId String
+  sortOrder   Int                  @default(0)
+  product     Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attribute   MeasurementAttribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, attributeId])
+  @@index([productId])
+  @@index([attributeId])
+}
+
+model ProductVariant {
+  id         String   @id @default(uuid())
+  productId  String
+  size       String   @db.VarChar(32)
+  color      String   @default("")
+  sizeId     String?
+  quantity   Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  catalogSize Size?   @relation(fields: [sizeId], references: [id], onDelete: SetNull)
+
+  @@unique([productId, size, color])
+  @@index([productId])
+  @@index([sizeId])
+}
+
+// Dynamic measurement keys (chest, length, shoulder, inseam, …). Not every size uses every attribute.
+model MeasurementAttribute {
+  id          String                 @id @default(uuid())
+  slug        String                 @unique
+  label       String
+  unit        String?
+  sortOrder   Int                    @default(0)
+  isActive    Boolean                @default(true)
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  sizeValues  SizeMeasurementValue[]
+  productUses ProductMeasurementAttribute[]
+
+  @@index([isActive])
+  @@index([sortOrder])
+}
+
+// Master size row (e.g. M, L, 32). Measurements are sparse: only attributes that apply.
+model Size {
+  id                String                 @id @default(uuid())
+  code              String                 @unique
+  name              String?
+  sortOrder         Int                    @default(0)
+  /** Optional: typical unit for numeric values in this size chart (cm or in) */
+  valueUnit         String?                @db.VarChar(4)
+  isActive          Boolean                @default(true)
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  measurementValues SizeMeasurementValue[]
+  productVariants   ProductVariant[]
+
+  @@index([isActive])
+  @@index([sortOrder])
+}
+
+model SizeMeasurementValue {
+  id          String               @id @default(uuid())
+  sizeId      String
+  attributeId String
+  value       String               @db.VarChar(64)
+  size        Size                 @relation(fields: [sizeId], references: [id], onDelete: Cascade)
+  attribute   MeasurementAttribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+
+  @@unique([sizeId, attributeId])
+  @@index([sizeId])
+  @@index([attributeId])
+}
+
+model ProductImage {
+  id         String   @id @default(uuid())
+  productId  String
+  path       String   @map("imageUrl")
+  color      String   @default("")
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+}
+
+model Coupon {
+  id            String             @id @default(uuid())
+  code          String             @unique
+  discountType  CouponDiscountType
+  value         Decimal            @db.Decimal(10, 2)
+  minSubtotal   Decimal?           @db.Decimal(10, 2)
+  maxDiscount   Decimal?           @db.Decimal(10, 2)
+  usageLimit    Int?
+  usedCount     Int                @default(0)
+  startsAt      DateTime?
+  endsAt        DateTime?
+  isActive      Boolean            @default(true)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  categoryLinks CouponCategory[]
+
+  @@index([isActive])
+  @@index([endsAt])
+}
+
+model CouponCategory {
+  id         String          @id @default(uuid())
+  couponId   String
+  categoryId String
+  coupon     Coupon          @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  category   ProductCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([couponId, categoryId])
+  @@index([couponId])
+  @@index([categoryId])
+}
