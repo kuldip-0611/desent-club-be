@@ -95,6 +95,20 @@ export class UpdateProductDto {
   categoryId?: string | null;
 
   @ApiPropertyOptional({
+    nullable: true,
+    description: 'UUID of subcategory under this category; set null or empty string to clear',
+  })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }): string | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null || value === '') return null;
+    return String(value).trim();
+  })
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @IsUUID()
+  subcategoryId?: string | null;
+
+  @ApiPropertyOptional({
     type: [String],
     description:
       'When set, replaces measurement links. Empty [] = no chart (custom sizes ok). Non-empty = every variant must use catalog size with these measurements.',

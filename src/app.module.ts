@@ -11,13 +11,18 @@ import { ProductCategoryModule } from './product-category/product-category.modul
 import { ProductModule } from './product/product.module';
 import { SettingsModule } from './settings/settings.module';
 import { SizingModule } from './sizing/sizing.module';
+import { UserGroupModule } from './user-group/user-group.module';
 import { UserModule } from './user/user.module';
+import { OrderModule } from './order/order.module';
+import { FirebaseModule } from './firebase/firebase.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    FirebaseModule,
     PrismaModule,
     UserModule,
+    UserGroupModule,
     AuthModule,
     AdminDashboardModule,
     ProductModule,
@@ -26,6 +31,7 @@ import { UserModule } from './user/user.module';
     CouponModule,
     SizingModule,
     SettingsModule,
+    OrderModule,
   ],
   controllers: [AppController],
   providers: [AppService],

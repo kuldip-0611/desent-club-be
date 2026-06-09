@@ -81,6 +81,12 @@ export class ProductController {
           format: 'uuid',
           description: 'Optional ProductCategory id from /admin/product-categories',
         },
+        subcategoryId: {
+          type: 'string',
+          format: 'uuid',
+          description:
+            'Optional ProductCategorySubcategory id; must belong to `categoryId` (see nested GET /admin/product-categories/:id/subcategories)',
+        },
         measurementAttributeIds: {
           type: 'string',
           example: '["uuid-chest","uuid-shoulder","uuid-length"]',

@@ -6,14 +6,29 @@ export class AdminDashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getOverview() {
-    const [products, availableProducts, lowStockProducts, users, categories, coupons, recentProducts] =
-      await this.prisma.$transaction([
+    const [
+      products,
+      availableProducts,
+      lowStockProducts,
+      users,
+      categories,
+      coupons,
+      totalOrders,
+      pendingOrders,
+      pendingReturns,
+      recentProducts,
+    ] = await this.prisma.$transaction([
         this.prisma.product.count(),
         this.prisma.product.count({ where: { isAvailable: true } }),
         this.prisma.product.count({ where: { quantity: { lte: 5 } } }),
         this.prisma.user.count(),
         this.prisma.productCategory.count(),
         this.prisma.coupon.count({ where: { isActive: true } }),
+        this.prisma.order.count(),
+        this.prisma.order.count({ where: { status: 'PENDING' } }),
+        this.prisma.returnRequest.count({
+          where: { status: { in: ['REQUESTED', 'APPROVED', 'RECEIVED'] } },
+        }),
         this.prisma.product.findMany({
           orderBy: { updatedAt: 'desc' },
           take: 8,
@@ -32,6 +47,9 @@ export class AdminDashboardService {
         users,
         categories,
         activeCoupons: coupons,
+        totalOrders,
+        pendingOrders,
+        pendingReturns,
       },
       recentProducts: recentProducts.map((product) => ({
         id: product.id,

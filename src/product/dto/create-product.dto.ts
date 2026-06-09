@@ -5,6 +5,7 @@ import {
   IsBoolean,
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
@@ -88,10 +89,18 @@ export class CreateProductDto {
   @MaxLength(10000)
   fabrics?: string;
 
-  @ApiPropertyOptional({ description: 'ProductCategory id from /admin/product-categories' })
+  @ApiProperty({ description: 'ProductCategory id from /admin/product-categories' })
+  @IsUUID()
+  @IsNotEmpty()
+  categoryId!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Optional ProductCategorySubcategory id; must belong to `categoryId` (same category).',
+  })
   @IsOptional()
   @IsUUID()
-  categoryId?: string;
+  subcategoryId?: string;
 
   @ApiPropertyOptional({
     description:

@@ -31,6 +31,9 @@ export class ProductCategoryService {
   findAll() {
     return this.prisma.productCategory.findMany({
       orderBy: [{ name: 'asc' }],
+      include: {
+        _count: { select: { subcategories: true, products: true } },
+      },
     });
   }
 

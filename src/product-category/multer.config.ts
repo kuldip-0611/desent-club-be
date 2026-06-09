@@ -7,6 +7,7 @@ import { extname, join } from 'path';
 import { IMAGE_MIME_REGEX, UPLOAD_LIMITS } from '../common/upload-settings';
 
 export const CATEGORY_UPLOAD_SUBDIR = 'categories';
+export const SUBCATEGORY_UPLOAD_SUBDIR = 'subcategories';
 
 export function ensureCategoryUploadDir(): string {
   const dir = join(process.cwd(), 'uploads', CATEGORY_UPLOAD_SUBDIR);
@@ -16,10 +17,18 @@ export function ensureCategoryUploadDir(): string {
   return dir;
 }
 
-export const categoryImageMulterOptions = {
+export function ensureSubcategoryUploadDir(): string {
+  const dir = join(process.cwd(), 'uploads', SUBCATEGORY_UPLOAD_SUBDIR);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+const buildImageMulterOptions = (destinationDir: string) => ({
   storage: diskStorage({
     destination: (_req, _file, cb) => {
-      cb(null, ensureCategoryUploadDir());
+      cb(null, destinationDir);
     },
     filename: (_req, file, cb) => {
       cb(
@@ -40,4 +49,12 @@ export const categoryImageMulterOptions = {
     }
     cb(null, true);
   },
-};
+});
+
+export const categoryImageMulterOptions = buildImageMulterOptions(
+  ensureCategoryUploadDir(),
+);
+
+export const subcategoryImageMulterOptions = buildImageMulterOptions(
+  ensureSubcategoryUploadDir(),
+);

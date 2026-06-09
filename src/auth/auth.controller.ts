@@ -16,6 +16,9 @@ import { AdminProtectedResponseDto } from './dto/admin-protected-response.dto';
 import { AuthTokensDto } from './dto/auth-tokens.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
 import { MessageResponseDto } from './dto/message-response.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
 import { SendEmailOtpDto } from './dto/send-email-otp.dto';
@@ -130,6 +133,35 @@ export class AuthController {
   @Post('refresh')
   refresh(@Body() dto: RefreshTokenDto) {
     return this.authService.refreshToken(dto);
+  }
+
+  @ApiOperation({ summary: 'Request password reset email' })
+  @ApiBody({ type: ForgotPasswordDto })
+  @ApiOkResponse({ type: MessageResponseDto })
+  @Post('forgot-password')
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.authService.forgotPassword(dto);
+  }
+
+  @ApiOperation({ summary: 'Reset password using email token' })
+  @ApiBody({ type: ResetPasswordDto })
+  @ApiOkResponse({ type: MessageResponseDto })
+  @Post('reset-password')
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto);
+  }
+
+  @ApiOperation({ summary: 'Change password for logged-in user' })
+  @ApiBearerAuth()
+  @ApiBody({ type: ChangePasswordDto })
+  @ApiOkResponse({ type: MessageResponseDto })
+  @UseGuards(JwtAuthGuard)
+  @Post('change-password')
+  changePassword(
+    @Req() req: Request & { user: JwtPayload },
+    @Body() dto: ChangePasswordDto,
+  ) {
+    return this.authService.changePassword(req.user.sub, dto);
   }
 
   @ApiOperation({ summary: 'Logout current user session' })

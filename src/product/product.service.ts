@@ -56,6 +56,13 @@ export type ProductCategorySummary = {
   slug: string;
 };
 
+export type ProductCategorySubcategorySummary = {
+  id: string;
+  name: string;
+  slug: string;
+  categoryId: string;
+};
+
 export type FabricSummary = {
   id: string;
   name: string;
@@ -77,12 +84,13 @@ export type ProductMeasurementAttributeSummary = {
   sortOrder: number;
 };
 
-export type ProductResponse = Omit<Product, 'price' | 'category'> & {
+export type ProductResponse = Omit<Product, 'price' | 'category' | 'subcategory'> & {
   /** List price before discount */
   price: number;
   /** Amount after `discountPercent` is applied; equals `price` when there is no discount */
   salePrice: number;
   category: ProductCategorySummary | null;
+  subcategory: ProductCategorySubcategorySummary | null;
   productFabrics: ProductFabricResponse[];
   /** Measurements that apply to this product’s size chart (chest, shoulder, …). Empty = custom sizes OK. */
   measurementAttributes: ProductMeasurementAttributeSummary[];
@@ -125,8 +133,16 @@ const measurementAttributePublicSelect = {
   sortOrder: true,
 } as const;
 
+const subcategoryAdminSelect = {
+  id: true,
+  name: true,
+  slug: true,
+  categoryId: true,
+} as const;
+
 const adminProductInclude = {
   category: { select: categorySelect },
+  subcategory: { select: subcategoryAdminSelect },
   productFabrics: {
     orderBy: [{ fabric: { name: 'asc' as const } }, { id: 'asc' as const }],
     include: { fabric: { select: fabricCatalogSelect } },
@@ -235,8 +251,15 @@ export class ProductService {
       ? resolvedVariants.reduce((a, r) => a + r.quantity, 0)
       : dto.quantity;
 
-    if (dto.categoryId) {
-      await this.assertCategoryExists(dto.categoryId);
+    const categoryIdNormalized = dto.categoryId?.trim();
+    if (!categoryIdNormalized) {
+      throw new BadRequestException('Category is required');
+    }
+    await this.assertCategoryExists(categoryIdNormalized);
+    let subcategoryIdForCreate: string | null = null;
+    if (dto.subcategoryId?.trim()) {
+      subcategoryIdForCreate = dto.subcategoryId.trim();
+      await this.assertSubcategoryMatchesCategory(categoryIdNormalized, subcategoryIdForCreate);
     }
 
     const fabricRows = await this.parseAndValidateFabrics(dto.fabrics);
@@ -269,7 +292,8 @@ export class ProductService {
           color: this.resolveColorInput(dto),
           fabric: '',
           discountPercent: dto.discountPercent ?? null,
-          categoryId: dto.categoryId?.trim() || null,
+          categoryId: categoryIdNormalized,
+          subcategoryId: subcategoryIdForCreate,
           isAvailable: dto.isAvailable,
         },
       });
@@ -320,6 +344,10 @@ export class ProductService {
 
   async update(id: string, dto: UpdateProductDto): Promise<ProductResponse> {
     await this.ensureProductExists(id);
+    const beforeCats = await this.prisma.product.findUniqueOrThrow({
+      where: { id },
+      select: { categoryId: true, subcategoryId: true },
+    });
 
     const data: Prisma.ProductUncheckedUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name;
@@ -335,14 +363,49 @@ export class ProductService {
     if (dto.discountPercent !== undefined) {
       data.discountPercent = dto.discountPercent;
     }
+
+    let resolvedCategoryId = beforeCats.categoryId ?? null;
     if (dto.categoryId !== undefined) {
       if (dto.categoryId === null) {
         data.categoryId = null;
+        resolvedCategoryId = null;
       } else {
         await this.assertCategoryExists(dto.categoryId);
-        data.categoryId = dto.categoryId.trim();
+        resolvedCategoryId = dto.categoryId.trim();
+        data.categoryId = resolvedCategoryId;
       }
     }
+
+    let resolvedSubcategoryId = beforeCats.subcategoryId ?? null;
+    if (dto.subcategoryId !== undefined) {
+      if (dto.subcategoryId === null || String(dto.subcategoryId).trim() === '') {
+        data.subcategoryId = null;
+        resolvedSubcategoryId = null;
+      } else {
+        if (!resolvedCategoryId) {
+          throw new BadRequestException('Subcategory requires a category');
+        }
+        const sid = String(dto.subcategoryId).trim();
+        await this.assertSubcategoryMatchesCategory(resolvedCategoryId, sid);
+        data.subcategoryId = sid;
+        resolvedSubcategoryId = sid;
+      }
+    } else if (resolvedCategoryId === null) {
+      data.subcategoryId = null;
+    } else if (
+      dto.categoryId !== undefined &&
+      resolvedSubcategoryId !== null &&
+      dto.subcategoryId === undefined
+    ) {
+      const still = await this.prisma.productCategorySubcategory.findFirst({
+        where: { id: resolvedSubcategoryId, categoryId: resolvedCategoryId },
+        select: { id: true },
+      });
+      if (!still) {
+        data.subcategoryId = null;
+      }
+    }
+
     if (dto.isAvailable !== undefined) data.isAvailable = dto.isAvailable;
 
     if (dto.fabrics !== undefined) {
@@ -640,6 +703,19 @@ export class ProductService {
     });
     if (!row) {
       throw new BadRequestException('Invalid product category id');
+    }
+  }
+
+  private async assertSubcategoryMatchesCategory(
+    categoryId: string,
+    subcategoryId: string,
+  ): Promise<void> {
+    const row = await this.prisma.productCategorySubcategory.findFirst({
+      where: { id: subcategoryId.trim(), categoryId: categoryId.trim() },
+      select: { id: true },
+    });
+    if (!row) {
+      throw new BadRequestException('Subcategory does not belong to this category');
     }
   }
 
@@ -945,6 +1021,7 @@ export class ProductService {
     const {
       productMeasurementAttributes: pmaRows,
       category: catRaw,
+      subcategory: subRaw,
       productFabrics: pfRows,
       images: imgRows,
       variants: varRows,
@@ -1000,6 +1077,14 @@ export class ProductService {
       ...productCore,
       category: cat
         ? { id: cat.id, name: cat.name, slug: cat.slug }
+        : null,
+      subcategory: subRaw
+        ? {
+            id: subRaw.id,
+            name: subRaw.name,
+            slug: subRaw.slug,
+            categoryId: subRaw.categoryId,
+          }
         : null,
       productFabrics,
       measurementAttributes,

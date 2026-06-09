@@ -58,6 +58,13 @@ export class UpdateCouponDto {
 
   @IsOptional()
   @ValidateIf((_, v) => v != null)
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  perUserLimit?: number | null;
+
+  @IsOptional()
+  @ValidateIf((_, v) => v != null)
   @IsDateString()
   startsAt?: string | null;
 

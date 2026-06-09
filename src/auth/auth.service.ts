@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'crypto';
 import {
   BadRequestException,
   HttpException,
@@ -18,6 +19,9 @@ import { UserLoginDto } from './dto/user-login.dto';
 import { SendEmailOtpDto } from './dto/send-email-otp.dto';
 import { SendPhoneOtpDto } from './dto/send-phone-otp.dto';
 import { VerifyEmailOtpDto } from './dto/verify-email-otp.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyPhoneOtpDto } from './dto/verify-phone-otp.dto';
 import { JwtPayload } from './interfaces/jwt-payload.interface';
 import { MockGoogleService } from './services/mock-google.service';
@@ -46,6 +50,7 @@ interface OtpRateLimit {
 @Injectable()
 export class AuthService {
   private readonly otpTtlMs = 5 * 60 * 1000;
+  private readonly passwordResetTtlMs = 60 * 60 * 1000;
   private readonly otpRateLimitWindowMs = 60 * 1000;
   private readonly otpRateLimitMax = 3;
   private readonly otpRateLimitMap = new Map<string, OtpRateLimit>();
@@ -289,6 +294,112 @@ export class AuthService {
   async logout(userId: string): Promise<{ message: string }> {
     await this.userService.updateRefreshToken(userId, null);
     return { message: 'Logged out successfully' };
+  }
+
+  async forgotPassword(dto: ForgotPasswordDto): Promise<{ message: string }> {
+    const generic = {
+      message:
+        'If an account exists for this email, you will receive a password reset link shortly.',
+    };
+    const email = dto.email.trim().toLowerCase();
+    const user = await this.userService.findByEmail(email);
+
+    if (
+      !user ||
+      user.role !== UserRole.USER ||
+      !user.password ||
+      user.provider !== AuthProviderType.EMAIL
+    ) {
+      return generic;
+    }
+
+    await this.prismaService.passwordResetToken.updateMany({
+      where: { userId: user.id, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+
+    const rawToken = randomBytes(32).toString('hex');
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + this.passwordResetTtlMs);
+
+    await this.prismaService.passwordResetToken.create({
+      data: { userId: user.id, tokenHash, expiresAt },
+    });
+
+    const frontendBase =
+      this.configService.get<string>('FRONTEND_URL')?.trim() ||
+      this.configService.get<string>('USER_APP_URL')?.trim() ||
+      'http://localhost:3000';
+    const resetLink = `${frontendBase.replace(/\/+$/, '')}/reset-password?token=${rawToken}`;
+
+    await this.otpMailService.sendPasswordResetEmail(email, resetLink);
+    return generic;
+  }
+
+  async resetPassword(dto: ResetPasswordDto): Promise<{ message: string }> {
+    const tokenHash = createHash('sha256').update(dto.token).digest('hex');
+    const record = await this.prismaService.passwordResetToken.findFirst({
+      where: {
+        tokenHash,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+    });
+
+    if (!record) {
+      throw new BadRequestException('Invalid or expired reset link');
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.password, 10);
+
+    await this.prismaService.$transaction([
+      this.prismaService.user.update({
+        where: { id: record.userId },
+        data: { password: hashedPassword },
+      }),
+      this.prismaService.passwordResetToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      }),
+      this.prismaService.passwordResetToken.updateMany({
+        where: { userId: record.userId, usedAt: null },
+        data: { usedAt: new Date() },
+      }),
+    ]);
+
+    await this.userService.updateRefreshToken(record.userId, null);
+
+    return { message: 'Password updated. You can sign in with your new password.' };
+  }
+
+  async changePassword(
+    userId: string,
+    dto: ChangePasswordDto,
+  ): Promise<{ message: string }> {
+    const user = await this.userService.findById(userId);
+    if (!user?.password) {
+      throw new BadRequestException(
+        'Password change is not available for this account. Use Google sign-in or contact support.',
+      );
+    }
+
+    const currentValid = await bcrypt.compare(dto.currentPassword, user.password);
+    if (!currentValid) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+
+    if (dto.currentPassword === dto.newPassword) {
+      throw new BadRequestException('New password must be different from the current password');
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.newPassword, 10);
+    await this.prismaService.user.update({
+      where: { id: userId },
+      data: { password: hashedPassword },
+    });
+    await this.userService.updateRefreshToken(userId, null);
+
+    return { message: 'Password changed successfully. Please sign in again.' };
   }
 
   async createAdmin(input: {

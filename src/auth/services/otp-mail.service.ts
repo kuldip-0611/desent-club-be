@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import type SMTPTransport from 'nodemailer/lib/smtp-transport';
+import { buildPasswordResetEmail } from '../templates/password-reset-email.template';
 import { buildRegistrationOtpEmail } from '../templates/registration-otp-email.template';
 
 @Injectable()
@@ -34,6 +35,33 @@ export class OtpMailService {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown mailer error';
       this.logger.error(`Failed sending registration OTP email to ${email}: ${message}`);
+      throw error;
+    }
+  }
+
+  async sendPasswordResetEmail(email: string, resetLink: string): Promise<void> {
+    const { subject, text, html } = buildPasswordResetEmail(resetLink);
+    const host = this.configService.get<string>('SMTP_HOST')?.trim();
+    const user = this.configService.get<string>('SMTP_USER')?.trim();
+    const from =
+      this.configService.get<string>('MAIL_FROM')?.trim() ||
+      user ||
+      'no-reply@desent.club';
+
+    if (!host) {
+      this.logger.log(
+        `Password reset link for ${email} (configure SMTP_HOST to send real mail)\n${text}`,
+      );
+      return;
+    }
+
+    try {
+      const transport = this.getTransporter();
+      await transport.sendMail({ from, to: email, subject, text, html });
+      this.logger.log(`Password reset email sent to ${email}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown mailer error';
+      this.logger.error(`Failed sending password reset email to ${email}: ${message}`);
       throw error;
     }
   }

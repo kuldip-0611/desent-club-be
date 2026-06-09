@@ -27,4 +27,8 @@ export class ValidateCouponDto {
   @IsUUID('4', { each: true })
   @ArrayUnique()
   categoryIds?: string[];
+
+  @IsOptional()
+  @IsUUID('4')
+  userId?: string;
 }

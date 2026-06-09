@@ -25,6 +25,10 @@ export class ListShopProductsQueryDto {
 
   @IsOptional()
   @IsString()
+  subcategory?: string;
+
+  @IsOptional()
+  @IsString()
   audience?: string;
 
   @IsOptional()

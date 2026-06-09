@@ -50,6 +50,12 @@ export class CreateCouponDto {
   usageLimit?: number;
 
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  perUserLimit?: number;
+
+  @IsOptional()
   @IsDateString()
   startsAt?: string;
 

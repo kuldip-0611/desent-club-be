@@ -23,9 +23,14 @@ import {
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { CreateProductCategorySubcategoryDto } from './dto/create-product-category-subcategory.dto';
 import { CreateProductCategoryDto } from './dto/create-product-category.dto';
 import { UpdateProductCategoryDto } from './dto/update-product-category.dto';
-import { categoryImageMulterOptions } from './multer.config';
+import {
+  categoryImageMulterOptions,
+  subcategoryImageMulterOptions,
+} from './multer.config';
+import { ProductCategorySubcategoryService } from './product-category-subcategory.service';
 import { ProductCategoryService } from './product-category.service';
 
 @ApiTags('Admin - Product categories')
@@ -34,12 +39,46 @@ import { ProductCategoryService } from './product-category.service';
 @Roles(UserRole.ADMIN)
 @ApiBearerAuth()
 export class ProductCategoryController {
-  constructor(private readonly service: ProductCategoryService) {}
+  constructor(
+    private readonly service: ProductCategoryService,
+    private readonly subcategoriesService: ProductCategorySubcategoryService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List product categories' })
   findAll() {
     return this.service.findAll();
+  }
+
+  @Get(':categoryId/subcategories')
+  @ApiOperation({ summary: 'List subcategories for this category (admin)' })
+  listSubcategories(@Param('categoryId', new ParseUUIDPipe()) categoryId: string) {
+    return this.subcategoriesService.findByCategoryId(categoryId);
+  }
+
+  @Post(':categoryId/subcategories')
+  @ApiOperation({ summary: 'Create subcategory under this category' })
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FileInterceptor('image', subcategoryImageMulterOptions))
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['slug', 'name', 'image'],
+      properties: {
+        slug: { type: 'string', example: 'round-neck' },
+        name: { type: 'string', example: 'Round neck' },
+        sortOrder: { type: 'number', example: 0 },
+        isActive: { type: 'boolean', example: true },
+        image: { type: 'string', format: 'binary' },
+      },
+    },
+  })
+  createSubcategory(
+    @Param('categoryId', new ParseUUIDPipe()) categoryId: string,
+    @Body() dto: CreateProductCategorySubcategoryDto,
+    @UploadedFile() image: Express.Multer.File,
+  ) {
+    return this.subcategoriesService.create(categoryId, dto, image);
   }
 
   @Get(':id')
