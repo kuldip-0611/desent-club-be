@@ -2,13 +2,16 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   Patch,
   Post,
   Query,
   Request,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { OrderStatus } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -80,6 +83,35 @@ export class OrderController {
     @Body() dto: CreateReturnDto,
   ) {
     return this.orderService.requestReturn(req.user.sub, id, dto);
+  }
+
+  @Get('orders/my/:id/items/:itemId/sizes')
+  @ApiOperation({ summary: 'Get available sizes for a specific order item (for exchange flow)' })
+  getOrderItemSizes(
+    @Request() req: { user: { sub: string } },
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+  ) {
+    return this.orderService.getOrderItemSizes(req.user.sub, id, itemId);
+  }
+
+  @Get('orders/my/:id/track')
+  @ApiOperation({ summary: 'Get shipment tracking for order' })
+  trackOrder(@Request() req: { user: { sub: string } }, @Param('id') id: string) {
+    return this.orderService.getOrderTracking(id, req.user.sub);
+  }
+
+  @Get('orders/my/:id/invoice')
+  @ApiOperation({ summary: 'Download HTML invoice for an order' })
+  @Header('Content-Type', 'text/html; charset=utf-8')
+  async downloadInvoice(
+    @Request() req: { user: { sub: string } },
+    @Param('id') id: string,
+    @Res() res: Response,
+  ) {
+    const html = await this.orderService.generateInvoiceHtml(id, req.user.sub);
+    res.setHeader('Content-Disposition', `inline; filename="invoice-${id.slice(-8).toUpperCase()}.html"`);
+    res.send(html);
   }
 
   @Post('orders/my/:id/reviews')

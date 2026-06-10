@@ -17,6 +17,7 @@ import Razorpay from 'razorpay';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationService } from '../notification/notification.service';
 import { CouponService } from '../coupon/coupon.service';
+import { ShiprocketService } from '../shiprocket/shiprocket.service';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -38,6 +39,7 @@ export class OrderService {
     private readonly config: ConfigService,
     private readonly notification: NotificationService,
     private readonly couponService: CouponService,
+    private readonly shiprocket: ShiprocketService,
   ) {
     this.razorpay = new Razorpay({
       key_id: this.config.getOrThrow<string>('RAZORPAY_KEY_ID'),
@@ -50,10 +52,11 @@ export class OrderService {
     dto: CreateOrderDto,
   ): Promise<{
     orderId: string;
-    razorpayOrderId: string;
+    paymentMethod: 'COD' | 'ONLINE';
+    razorpayOrderId?: string;
     amount: number;
     currency: string;
-    keyId: string;
+    keyId?: string;
   }> {
     if (!dto.items.length) {
       throw new BadRequestException('Order must contain at least one item');
@@ -176,6 +179,89 @@ export class OrderService {
       }
     }
 
+    const isCod = dto.paymentMethod === 'COD';
+
+    if (isCod) {
+      // COD: skip Razorpay, confirm order immediately
+      const order = await this.prisma.order.create({
+        data: {
+          userId,
+          status: OrderStatus.CONFIRMED,
+          subtotal,
+          discountAmount,
+          total,
+          couponId,
+          shippingAddress: shippingAddress ?? Prisma.JsonNull,
+          notes: dto.notes,
+          items: { create: orderItems },
+          payment: {
+            create: {
+              method: PaymentMethod.COD,
+              razorpayOrderId: `cod_${Date.now()}`,
+              amount: amountPaise,
+              currency: 'INR',
+              status: PaymentStatus.PENDING, // COD paid on delivery
+            },
+          },
+        },
+        include: {
+          items: { include: { product: { select: { id: true, name: true, quantity: true } } } },
+          user: { select: { id: true, name: true, email: true, fcmToken: true } },
+        },
+      });
+
+      // Deduct inventory + redeem coupon atomically
+      await this.prisma.$transaction(async (tx) => {
+        for (const item of order.items) {
+          if (item.variantId) {
+            await tx.productVariant.update({
+              where: { id: item.variantId },
+              data: { quantity: { decrement: item.quantity } },
+            });
+          }
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { quantity: { decrement: item.quantity } },
+          });
+        }
+        if (couponId) {
+          await this.couponService.redeem(tx, couponId, userId);
+        }
+      });
+
+      // Send confirmation email + push (fire-and-forget)
+      this.notification.notifyOrderConfirmed({
+        orderId: order.id,
+        userName: order.user.name,
+        userEmail: order.user.email ?? '',
+        fcmToken: order.user.fcmToken ?? undefined,
+        items: order.items.map((item) => ({
+          name: item.product.name,
+          size: item.size,
+          color: item.color,
+          quantity: item.quantity,
+          unitPrice: Number(item.unitPrice),
+          total: Number(item.total),
+        })),
+        subtotal: Number(order.subtotal),
+        discountAmount: Number(order.discountAmount),
+        total: Number(order.total),
+        shippingAddress: order.shippingAddress as Record<string, string>,
+      });
+
+      // Admin alert + low-stock check (fire-and-forget)
+      this.notification.sendAdminOrderAlert('new_order', order.id, order.user.name, Number(order.total)).catch(() => undefined);
+      this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name }))).catch(() => undefined);
+
+      return {
+        orderId: order.id,
+        paymentMethod: 'COD',
+        amount: amountPaise,
+        currency: 'INR',
+      };
+    }
+
+    // Online payment: create Razorpay order
     const rpOrder = await this.razorpay.orders.create({
       amount: amountPaise,
       currency: 'INR',
@@ -208,6 +294,7 @@ export class OrderService {
 
     return {
       orderId: order.id,
+      paymentMethod: 'ONLINE',
       razorpayOrderId: rpOrder.id,
       amount: amountPaise,
       currency: 'INR',
@@ -304,6 +391,10 @@ export class OrderService {
       total: Number(order.total),
       shippingAddress: order.shippingAddress as Record<string, unknown> | null,
     });
+
+    // Admin alert + low-stock check
+    this.notification.sendAdminOrderAlert('new_order', payment.orderId, order.user.name, Number(order.total)).catch(() => undefined);
+    this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name }))).catch(() => undefined);
 
     return { message: 'Payment verified successfully', orderId: payment.orderId };
   }
@@ -501,16 +592,95 @@ export class OrderService {
       throw new BadRequestException('A return request already exists for this order');
     }
 
+    const returnType = dto.type ?? 'RETURN';
+
+    // Validate exchange fields
+    if (returnType === 'EXCHANGE') {
+      if (!dto.orderItemId) {
+        throw new BadRequestException('orderItemId is required for size exchange');
+      }
+      if (!dto.exchangeSize?.trim()) {
+        throw new BadRequestException('exchangeSize is required for size exchange');
+      }
+      // Confirm the item belongs to this order
+      const item = order['items'] as any[];
+      // We need items — re-query with items
+      const fullOrder = await this.prisma.order.findFirst({
+        where: { id: orderId, userId },
+        include: { items: { include: { product: { include: { variants: true } } } } },
+      });
+      const orderItem = fullOrder?.items.find((i) => i.id === dto.orderItemId);
+      if (!orderItem) {
+        throw new BadRequestException('Order item not found in this order');
+      }
+      if (!orderItem.size) {
+        throw new BadRequestException('Selected item has no size — cannot exchange for a different size');
+      }
+      // Check requested size is actually available as a variant
+      const availableSizes = orderItem.product.variants.map((v) => v.size.toLowerCase());
+      if (!availableSizes.includes(dto.exchangeSize.trim().toLowerCase())) {
+        throw new BadRequestException(`Size "${dto.exchangeSize}" is not available for this product`);
+      }
+      if (orderItem.size.toLowerCase() === dto.exchangeSize.trim().toLowerCase()) {
+        throw new BadRequestException('Exchange size must be different from the original ordered size');
+      }
+    }
+
     const returnRequest = await this.prisma.returnRequest.create({
       data: {
         orderId,
         userId,
         reason: dto.reason.trim(),
+        type: returnType,
+        orderItemId: returnType === 'EXCHANGE' ? dto.orderItemId : null,
+        exchangeSize: returnType === 'EXCHANGE' ? dto.exchangeSize!.trim() : null,
         status: ReturnStatus.REQUESTED,
       },
     });
 
-    return { message: 'Return request submitted', returnId: returnRequest.id };
+    const message =
+      returnType === 'EXCHANGE'
+        ? `Size exchange request submitted — you requested size ${dto.exchangeSize}`
+        : 'Return request submitted';
+
+    return { message, returnId: returnRequest.id };
+  }
+
+  /** Returns the list of available variant sizes for an item in the user's order */
+  async getOrderItemSizes(
+    userId: string,
+    orderId: string,
+    itemId: string,
+  ): Promise<{ currentSize: string; availableSizes: { size: string; quantity: number }[] }> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+      include: {
+        items: {
+          where: { id: itemId },
+          include: { product: { include: { variants: { where: { quantity: { gt: 0 } } } } } },
+        },
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    const item = order.items[0];
+    if (!item) throw new NotFoundException('Order item not found');
+    if (!item.size) throw new BadRequestException('This item has no size');
+
+    const sizes = item.product.variants
+      .filter((v) => v.size.toLowerCase() !== item.size.toLowerCase())
+      .map((v) => ({ size: v.size, quantity: v.quantity }))
+      // deduplicate by size (different colors may share size)
+      .reduce(
+        (acc, v) => {
+          const existing = acc.find((a) => a.size.toLowerCase() === v.size.toLowerCase());
+          if (existing) existing.quantity += v.quantity;
+          else acc.push(v);
+          return acc;
+        },
+        [] as { size: string; quantity: number }[],
+      );
+
+    return { currentSize: item.size, availableSizes: sizes };
   }
 
   async submitReviews(userId: string, orderId: string, dto: CreateReviewsDto) {
@@ -852,7 +1022,11 @@ export class OrderService {
   async updateOrderStatus(orderId: string, status: OrderStatus) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      include: { payment: true },
+      include: {
+        payment: true,
+        items: { include: { product: true } },
+        user: true,
+      },
     });
     if (!order) throw new NotFoundException('Order not found');
 
@@ -892,6 +1066,299 @@ export class OrderService {
     });
     this.notification.notifyOrderStatusChanged(statusUser?.fcmToken, orderId, status);
 
+    // ── Shiprocket integration ───────────────────────────────────────────
+    if (status === OrderStatus.PROCESSING) {
+      this.pushToShiprocket(order).catch((err) =>
+        console.error('[Shiprocket] createOrder failed:', err?.message),
+      );
+    }
+
+    if (status === OrderStatus.SHIPPED && order.shiprocketOrderId) {
+      this.assignShiprocketAWB(orderId, order.shiprocketOrderId).catch((err) =>
+        console.error('[Shiprocket] assignAWB failed:', err?.message),
+      );
+    }
+
     return updated;
+  }
+
+  // ── Shiprocket helpers ────────────────────────────────────────────────────
+
+  private async pushToShiprocket(order: {
+    id: string;
+    createdAt: Date;
+    total: Prisma.Decimal;
+    shippingAddress: Prisma.JsonValue;
+    payment: { method: string } | null;
+    user: { name: string; email: string | null; phone: string | null };
+    items: {
+      product: { name: string; id: string };
+      variantId: string | null;
+      size: string;
+      quantity: number;
+      unitPrice: Prisma.Decimal;
+    }[];
+  }) {
+    const addr = (order.shippingAddress ?? {}) as Record<string, string>;
+    const name = addr['fullName'] ?? order.user.name;
+    const phone = addr['phone'] ?? order.user.phone ?? '0000000000';
+
+    const { shiprocketOrderId, shiprocketShipmentId } =
+      await this.shiprocket.createOrder({
+        orderId: order.id,
+        orderDate: order.createdAt.toISOString().split('T')[0],
+
+        billingCustomerName: name,
+        billingPhone: phone,
+        billingAddress: addr['line1'] ?? '',
+        billingCity: addr['city'] ?? '',
+        billingState: addr['state'] ?? '',
+        billingPincode: addr['pincode'] ?? '',
+        billingCountry: addr['country'] ?? 'India',
+
+        shippingCustomerName: name,
+        shippingPhone: phone,
+        shippingAddress: addr['line1'] ?? '',
+        shippingCity: addr['city'] ?? '',
+        shippingState: addr['state'] ?? '',
+        shippingPincode: addr['pincode'] ?? '',
+        shippingCountry: addr['country'] ?? 'India',
+
+        paymentMethod:
+          order.payment?.method === 'COD' ? 'COD' : 'Prepaid',
+        subTotal: Number(order.total),
+
+        // Default parcel dimensions — update as needed for your packaging
+        length: 25,
+        breadth: 20,
+        height: 5,
+        weight: 0.5,
+
+        items: order.items.map((item) => ({
+          name: item.product.name,
+          sku: item.variantId ?? item.product.id,
+          units: item.quantity,
+          selling_price: String(Number(item.unitPrice)),
+        })),
+      });
+
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: {
+        shiprocketOrderId,
+        // store shipment id temporarily in trackingUrl until AWB is assigned
+        trackingUrl: `sr_shipment:${shiprocketShipmentId}`,
+      },
+    });
+
+    console.log(
+      `[Shiprocket] Order created — shiprocketOrderId=${shiprocketOrderId} shipmentId=${shiprocketShipmentId}`,
+    );
+  }
+
+  private async assignShiprocketAWB(
+    orderId: string,
+    shiprocketOrderId: string,
+  ) {
+    // Retrieve the stored shipment id
+    const dbOrder = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { trackingUrl: true },
+    });
+
+    const shipmentId = dbOrder?.trackingUrl?.startsWith('sr_shipment:')
+      ? dbOrder.trackingUrl.replace('sr_shipment:', '')
+      : shiprocketOrderId; // fallback
+
+    const { awbCode, courierName, trackingUrl } =
+      await this.shiprocket.assignAWB(shipmentId);
+
+    await this.prisma.order.update({
+      where: { id: orderId },
+      data: { awbCode, courierName, trackingUrl },
+    });
+
+    console.log(
+      `[Shiprocket] AWB assigned — awb=${awbCode} courier=${courierName}`,
+    );
+  }
+
+  async getOrderTracking(orderId: string, userId: string) {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+      select: {
+        status: true,
+        awbCode: true,
+        courierName: true,
+        trackingUrl: true,
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    let shiprocketTracking: Record<string, unknown> | null = null;
+    if (order.awbCode) {
+      try {
+        shiprocketTracking = await this.shiprocket.trackByAwb(order.awbCode);
+      } catch {
+        // best-effort
+      }
+    }
+
+    return {
+      status: order.status,
+      awbCode: order.awbCode,
+      courierName: order.courierName,
+      trackingUrl: order.trackingUrl,
+      shiprocketTracking,
+    };
+  }
+
+  // ─── Invoice HTML Generator ───────────────────────────────────────────────
+
+  async generateInvoiceHtml(orderId: string, userId: string): Promise<string> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+      include: {
+        items: { include: { product: { select: { name: true } } } },
+        payment: true,
+        coupon: { select: { code: true } },
+        user: { select: { name: true, email: true } },
+      },
+    });
+    if (!order) throw new Error('Order not found');
+
+    const addr = order.shippingAddress as Record<string, string> | null;
+    const ref = order.id.slice(-8).toUpperCase();
+    const dateStr = new Date(order.createdAt).toLocaleDateString('en-IN', {
+      day: 'numeric', month: 'long', year: 'numeric',
+    });
+    const rows = order.items
+      .map(
+        (i) => `
+      <tr>
+        <td style="padding:10px 8px;border-bottom:1px solid #f1f5f9">${i.product.name}${i.size ? ' / ' + i.size : ''}${i.color ? ' / ' + i.color : ''}</td>
+        <td style="padding:10px 8px;border-bottom:1px solid #f1f5f9;text-align:center">${i.quantity}</td>
+        <td style="padding:10px 8px;border-bottom:1px solid #f1f5f9;text-align:right">₹${Number(i.unitPrice).toFixed(2)}</td>
+        <td style="padding:10px 8px;border-bottom:1px solid #f1f5f9;text-align:right">₹${Number(i.total).toFixed(2)}</td>
+      </tr>`,
+      )
+      .join('');
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Invoice #${ref} — Desent Club</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',Arial,sans-serif;background:#f8fafc;color:#1e293b;padding:32px}
+    .card{background:#fff;border-radius:16px;max-width:720px;margin:0 auto;padding:40px;box-shadow:0 4px 24px rgba(0,0,0,.08)}
+    .header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #6366f1;padding-bottom:24px;margin-bottom:24px}
+    .brand{font-size:22px;font-weight:800;color:#6366f1}
+    .brand span{display:block;font-size:11px;font-weight:500;color:#94a3b8;letter-spacing:.1em;text-transform:uppercase;margin-top:2px}
+    .invoice-meta{text-align:right;font-size:13px;color:#64748b}
+    .invoice-meta strong{display:block;font-size:22px;font-weight:700;color:#1e293b;margin-bottom:4px}
+    .section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#94a3b8;margin-bottom:8px}
+    .two-col{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:28px}
+    .info-box{background:#f8fafc;border-radius:10px;padding:16px}
+    .info-box p{font-size:13px;line-height:1.7;color:#475569}
+    table{width:100%;border-collapse:collapse;margin-bottom:24px}
+    thead tr{background:#6366f1;color:#fff}
+    thead th{padding:10px 8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+    th:not(:first-child),td:not(:first-child){text-align:right}
+    th:nth-child(2),td:nth-child(2){text-align:center}
+    tbody tr:hover{background:#f8fafc}
+    .totals{margin-left:auto;width:260px}
+    .totals tr td{padding:6px 8px;font-size:14px}
+    .totals tr td:last-child{text-align:right;font-weight:600}
+    .grand td{font-size:16px;font-weight:800;color:#6366f1;border-top:2px solid #e2e8f0;padding-top:10px}
+    .badge{display:inline-block;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:700;text-transform:uppercase}
+    .badge-paid{background:#dcfce7;color:#15803d}
+    .badge-pending{background:#fef3c7;color:#92400e}
+    .footer{margin-top:32px;padding-top:20px;border-top:1px solid #e2e8f0;font-size:12px;color:#94a3b8;text-align:center}
+    @media print{body{background:#fff;padding:0}.card{box-shadow:none}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div class="brand">Desent Club<span>Premium Fashion</span></div>
+      <div class="invoice-meta">
+        <strong>TAX INVOICE</strong>
+        <div>Invoice #${ref}</div>
+        <div>Date: ${dateStr}</div>
+        <div style="margin-top:6px">
+          <span class="badge ${order.payment?.status === 'PAID' ? 'badge-paid' : 'badge-pending'}">
+            ${order.payment?.status === 'PAID' ? 'PAID' : order.payment?.method === 'COD' ? 'COD — Pay on Delivery' : 'PENDING'}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div>
+        <p class="section-title">Billed To</p>
+        <div class="info-box">
+          <p><strong>${order.user.name}</strong></p>
+          <p>${order.user.email ?? ''}</p>
+        </div>
+      </div>
+      <div>
+        <p class="section-title">Shipping Address</p>
+        <div class="info-box">
+          ${addr ? `
+          <p><strong>${addr.fullName ?? ''}</strong></p>
+          <p>${addr.line1 ?? ''}${addr.line2 ? ', ' + addr.line2 : ''}</p>
+          <p>${addr.city ?? ''}, ${addr.state ?? ''} — ${addr.pincode ?? ''}</p>
+          <p>${addr.phone ?? ''}</p>` : '<p>—</p>'}
+        </div>
+      </div>
+    </div>
+
+    <p class="section-title">Order Items</p>
+    <table>
+      <thead>
+        <tr>
+          <th style="text-align:left">Item</th>
+          <th>Qty</th>
+          <th>Unit Price</th>
+          <th>Total</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+
+    <table class="totals">
+      <tr><td>Subtotal</td><td>₹${Number(order.subtotal).toFixed(2)}</td></tr>
+      ${Number(order.discountAmount) > 0 ? `<tr><td>Discount${order.coupon ? ' (' + order.coupon.code + ')' : ''}</td><td style="color:#ef4444">− ₹${Number(order.discountAmount).toFixed(2)}</td></tr>` : ''}
+      <tr><td>Shipping</td><td>Free</td></tr>
+      <tr class="grand"><td>Total</td><td>₹${Number(order.total).toFixed(2)}</td></tr>
+    </table>
+
+    <div class="footer">
+      Thank you for shopping with Desent Club! For support, contact support@desenclub.com<br/>
+      This is a computer-generated invoice and does not require a signature.
+    </div>
+  </div>
+  <script>window.onload = () => window.print();</script>
+</body>
+</html>`;
+  }
+
+  // ─── Inventory Alert Helper ───────────────────────────────────────────────
+
+  private async checkLowStockAfterOrder(
+    items: { productId: string; name: string }[],
+  ): Promise<void> {
+    const LOW_STOCK_THRESHOLD = 5;
+    for (const item of items) {
+      const product = await this.prisma.product.findUnique({
+        where: { id: item.productId },
+        select: { quantity: true },
+      });
+      if (product && product.quantity <= LOW_STOCK_THRESHOLD) {
+        await this.notification.sendAdminLowStockAlert(item.name, product.quantity);
+      }
+    }
   }
 }

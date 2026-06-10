@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -18,5 +18,11 @@ export class AdminDashboardController {
   @ApiOperation({ summary: 'Get admin dashboard overview stats and recent products' })
   overview() {
     return this.dashboardService.getOverview();
+  }
+
+  @Get('analytics')
+  @ApiOperation({ summary: 'Revenue, orders, users charts + top products' })
+  analytics(@Query('period') period?: 'daily' | 'weekly' | 'monthly') {
+    return this.dashboardService.getAnalytics(period ?? 'daily');
   }
 }

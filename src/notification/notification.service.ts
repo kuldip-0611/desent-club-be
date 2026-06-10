@@ -157,6 +157,113 @@ export class NotificationService {
       .catch(() => undefined);
   }
 
+  // ─── Notification Inbox Helpers ──────────────────────────────────────────
+
+  /** Persist a notification to DB for a specific user and optionally push it */
+  async persistAndPush(
+    userId: string,
+    title: string,
+    body: string,
+    type = 'general',
+    fcmToken?: string | null,
+    data?: Record<string, unknown>,
+  ): Promise<void> {
+    await this.prisma.notification.create({
+      data: { userId, title, body, type, data: data as any },
+    });
+    if (fcmToken) {
+      this.firebase.sendToToken(fcmToken, { title, body }).catch(() => undefined);
+    }
+  }
+
+  /** List notifications for a user (max 50, newest first) */
+  async listForUser(userId: string, onlyUnread = false) {
+    return this.prisma.notification.findMany({
+      where: { userId, ...(onlyUnread ? { isRead: false } : {}) },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+  }
+
+  /** Count unread notifications */
+  async countUnread(userId: string) {
+    return this.prisma.notification.count({ where: { userId, isRead: false } });
+  }
+
+  /** Mark one notification as read */
+  async markRead(id: string, userId: string) {
+    return this.prisma.notification.updateMany({
+      where: { id, userId },
+      data: { isRead: true },
+    });
+  }
+
+  /** Mark all notifications as read */
+  async markAllRead(userId: string) {
+    return this.prisma.notification.updateMany({
+      where: { userId, isRead: false },
+      data: { isRead: true },
+    });
+  }
+
+  /** Delete a notification */
+  async deleteOne(id: string, userId: string) {
+    return this.prisma.notification.deleteMany({ where: { id, userId } });
+  }
+
+  // ─── Admin email alert helpers ────────────────────────────────────────────
+
+  async sendAdminLowStockAlert(productName: string, qty: number): Promise<void> {
+    const adminEmail = this.configService.get<string>('ADMIN_ALERT_EMAIL');
+    if (!adminEmail) return;
+    const subject = `⚠️ Low stock alert: ${productName}`;
+    const text = `Product "${productName}" has only ${qty} unit(s) remaining. Please restock soon.`;
+    const html = `<p>Product <strong>${productName}</strong> has only <strong>${qty}</strong> unit(s) remaining.</p><p>Please restock soon.</p>`;
+    this.send(adminEmail, subject, text, html).catch((err) =>
+      this.logger.error(`Low stock alert failed: ${err}`),
+    );
+  }
+
+  async sendAdminOrderAlert(
+    type: 'new_order' | 'return_request',
+    orderId: string,
+    userName: string,
+    total?: number,
+  ): Promise<void> {
+    const adminEmail = this.configService.get<string>('ADMIN_ALERT_EMAIL');
+    if (!adminEmail) return;
+    const ref = orderId.slice(-8).toUpperCase();
+    const subject =
+      type === 'new_order'
+        ? `🛒 New order #${ref} — ₹${(total ?? 0).toFixed(2)}`
+        : `↩️ Return request for order #${ref}`;
+    const text =
+      type === 'new_order'
+        ? `New order placed by ${userName}. Order ID: ${orderId}, Total: ₹${(total ?? 0).toFixed(2)}`
+        : `Return requested by ${userName} for order ${orderId}`;
+    this.send(adminEmail, subject, text, `<p>${text}</p>`).catch(() => undefined);
+  }
+
+  async sendAbandonedCartEmail(
+    to: string,
+    userName: string,
+    items: { name: string; quantity: number; unitPrice: number }[],
+  ): Promise<void> {
+    const subject = `🛒 You left something in your cart — Desent Club`;
+    const itemRows = items
+      .map((i) => `<li>${i.name} × ${i.quantity} — ₹${(i.unitPrice * i.quantity).toFixed(2)}</li>`)
+      .join('');
+    const html = `
+      <p>Hi ${userName},</p>
+      <p>You left some items in your cart at <strong>Desent Club</strong>:</p>
+      <ul>${itemRows}</ul>
+      <p>Complete your purchase before items sell out!</p>
+      <a href="${this.configService.get('NEXT_PUBLIC_SITE_URL') ?? 'https://desenclub.com'}/cart" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-top:16px;">Complete Purchase →</a>
+    `;
+    const text = `Hi ${userName}, you left ${items.length} item(s) in your Desent Club cart. Visit desenclub.com/cart to complete your purchase.`;
+    this.send(to, subject, text, html).catch(() => undefined);
+  }
+
   private async pushNewCouponToAll(coupon: CouponPayload): Promise<void> {
     const users = await this.prisma.user.findMany({
       where: { fcmToken: { not: null } },

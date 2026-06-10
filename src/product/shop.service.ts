@@ -97,6 +97,14 @@ export class ShopService {
     const audience = String(query.audience ?? '').trim().toUpperCase();
     const sort = String(query.sort ?? 'featured').trim();
 
+    // Advanced filter parsing
+    const minPrice = query.minPrice !== undefined ? Number(query.minPrice) : undefined;
+    const maxPrice = query.maxPrice !== undefined ? Number(query.maxPrice) : undefined;
+    const colorList = query.colors ? query.colors.split(',').map((c) => c.trim().toLowerCase()).filter(Boolean) : [];
+    const sizeList = query.sizes ? query.sizes.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean) : [];
+    const fabricList = query.fabrics ? query.fabrics.split(',').map((f) => f.trim().toLowerCase()).filter(Boolean) : [];
+    const minRating = query.minRating !== undefined ? Number(query.minRating) : undefined;
+
     const audienceFilter: ProductAudience | undefined =
       audience === 'MEN' || audience === 'WOMEN' || audience === 'UNISEX'
         ? (audience as ProductAudience)
@@ -146,6 +154,25 @@ export class ShopService {
             ],
           }
         : {}),
+      // Price range
+      ...(minPrice !== undefined ? { price: { gte: minPrice } } : {}),
+      ...(maxPrice !== undefined ? { price: { ...(minPrice !== undefined ? { gte: minPrice } : {}), lte: maxPrice } } : {}),
+      // Color filter (variant color)
+      ...(colorList.length > 0
+        ? { variants: { some: { color: { in: colorList } } } }
+        : {}),
+      // Size filter (variant size)
+      ...(sizeList.length > 0
+        ? { variants: { some: { size: { in: sizeList } } } }
+        : {}),
+      // Fabric filter
+      ...(fabricList.length > 0
+        ? {
+            productFabrics: {
+              some: { fabric: { name: { in: fabricList.map((f) => f.charAt(0).toUpperCase() + f.slice(1)) } } },
+            },
+          }
+        : {}),
     };
 
     const orderBy =
@@ -171,7 +198,13 @@ export class ShopService {
       this.prisma.product.count({ where }),
     ]);
 
-    const items = await this.attachReviewStats(rows.map((row) => this.toShopProduct(row)));
+    let items = await this.attachReviewStats(rows.map((row) => this.toShopProduct(row)));
+
+    // Post-filter by rating (done in-memory since rating is computed)
+    if (minRating !== undefined && minRating > 0) {
+      items = items.filter((p) => p.rating >= minRating);
+    }
+
     return {
       items,
       total,
@@ -422,6 +455,116 @@ export class ShopService {
       variants: variants.length ? variants : [{ id: `${row.id}-v1`, size: 'M', colorName: 'Default', colorHex: '#111827', stock: 0 }],
       isNewArrival: true,
       isBestSeller: true,
+    };
+  }
+
+  /** Returns the size guide table for a product (variants × measurement attributes) */
+  async getSizeChart(slug: string) {
+    const id = slug.includes('--') ? slug.split('--').pop() ?? '' : slug;
+    const product = await this.prisma.product.findFirst({
+      where: { id, isAvailable: true },
+      include: {
+        variants: {
+          include: {
+            catalogSize: {
+              include: {
+                measurementValues: {
+                  include: { attribute: { select: { slug: true, label: true, unit: true, sortOrder: true } } },
+                },
+              },
+            },
+          },
+        },
+        productMeasurementAttributes: {
+          orderBy: { sortOrder: 'asc' },
+          include: { attribute: { select: { slug: true, label: true, unit: true } } },
+        },
+      },
+    });
+
+    if (!product) return { attributes: [], rows: [] };
+
+    const attrOrder = product.productMeasurementAttributes.map((pa) => pa.attribute);
+
+    const uniqueSizes = new Map<string, typeof product.variants[0]['catalogSize']>();
+    for (const v of product.variants) {
+      if (v.size && !uniqueSizes.has(v.size)) {
+        uniqueSizes.set(v.size, v.catalogSize);
+      }
+    }
+
+    const rows = [...uniqueSizes.entries()].map(([size, catalogSize]) => {
+      const values: Record<string, string> = {};
+      for (const mv of catalogSize?.measurementValues ?? []) {
+        values[mv.attribute.slug] = mv.value;
+      }
+      return { size, values };
+    });
+
+    return {
+      attributes: attrOrder,
+      rows,
+    };
+  }
+
+  /** Returns available filter options for the current catalog (colors, sizes, fabrics, price range) */
+  async getFilterOptions() {
+    const [colors, sizes, fabrics, priceRange] = await Promise.all([
+      this.prisma.productVariant.findMany({
+        distinct: ['color'],
+        where: { color: { not: '' }, product: { isAvailable: true } },
+        select: { color: true },
+        orderBy: { color: 'asc' },
+      }),
+      this.prisma.productVariant.findMany({
+        distinct: ['size'],
+        where: { product: { isAvailable: true } },
+        select: { size: true },
+        orderBy: { size: 'asc' },
+      }),
+      this.prisma.fabric.findMany({
+        where: { isActive: true },
+        select: { id: true, name: true, slug: true },
+        orderBy: { name: 'asc' },
+      }),
+      this.prisma.product.aggregate({
+        where: { isAvailable: true },
+        _min: { price: true },
+        _max: { price: true },
+      }),
+    ]);
+
+    return {
+      colors: colors.map((c) => c.color).filter(Boolean),
+      sizes: sizes.map((s) => s.size).filter(Boolean),
+      fabrics: fabrics.map((f) => ({ id: f.id, name: f.name, slug: f.slug })),
+      priceRange: {
+        min: Number(priceRange._min.price ?? 0),
+        max: Number(priceRange._max.price ?? 10000),
+      },
+    };
+  }
+
+  /** Returns product slugs + category slugs for sitemap generation */
+  async getSitemapData() {
+    const [products, categories] = await Promise.all([
+      this.prisma.product.findMany({
+        where: { isAvailable: true },
+        select: { id: true, name: true, updatedAt: true },
+        orderBy: { updatedAt: 'desc' },
+      }),
+      this.prisma.productCategory.findMany({
+        where: { isActive: true },
+        select: { slug: true },
+      }),
+    ]);
+
+    return {
+      products: products.map((p) => ({
+        slug: `${slugify(p.name)}--${p.id}`,
+        updatedAt: p.updatedAt.toISOString(),
+      })),
+      categories: categories.map((c) => ({ slug: mapCategorySlug(c.slug) })),
     };
   }
 

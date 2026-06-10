@@ -176,6 +176,15 @@ export class ProductController {
     return this.productService.removeImage(productId, imageId);
   }
 
+  @Patch(':id/images/reorder')
+  @ApiOperation({ summary: 'Reorder product images by sortOrder' })
+  reorderImages(
+    @Param('id', new ParseUUIDPipe()) productId: string,
+    @Body('order') order: { id: string; sortOrder: number }[],
+  ) {
+    return this.productService.reorderImages(productId, order);
+  }
+
   @Delete(':id')
   @ApiOperation({ summary: 'Delete product and its images' })
   remove(@Param('id', new ParseUUIDPipe()) id: string) {

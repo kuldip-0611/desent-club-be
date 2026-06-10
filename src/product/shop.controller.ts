@@ -60,4 +60,22 @@ export class ShopController {
       limit ? parseInt(limit, 10) : 10,
     );
   }
+
+  @Get('products/:slug/size-chart')
+  @ApiOperation({ summary: 'Get size guide / measurement chart for a product' })
+  getSizeChart(@Param('slug') slug: string) {
+    return this.shopService.getSizeChart(slug);
+  }
+
+  @Get('filter-options')
+  @ApiOperation({ summary: 'Available filter options (colors, sizes, fabrics, price range)' })
+  getFilterOptions() {
+    return this.shopService.getFilterOptions();
+  }
+
+  @Get('sitemap-data')
+  @ApiOperation({ summary: 'Sitemap data — product + category slugs' })
+  getSitemapData() {
+    return this.shopService.getSitemapData();
+  }
 }

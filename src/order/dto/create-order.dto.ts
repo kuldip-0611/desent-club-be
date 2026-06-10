@@ -1,8 +1,8 @@
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsIn,
   IsInt,
-  IsNotEmpty,
   IsOptional,
   IsString,
   IsUUID,
@@ -58,4 +58,9 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @ApiPropertyOptional({ enum: ['COD', 'ONLINE'], default: 'ONLINE' })
+  @IsOptional()
+  @IsIn(['COD', 'ONLINE'])
+  paymentMethod?: 'COD' | 'ONLINE';
 }

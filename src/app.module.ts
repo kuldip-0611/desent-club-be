@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
@@ -15,11 +16,16 @@ import { UserGroupModule } from './user-group/user-group.module';
 import { UserModule } from './user/user.module';
 import { OrderModule } from './order/order.module';
 import { FirebaseModule } from './firebase/firebase.module';
+import { ShiprocketModule } from './shiprocket/shiprocket.module';
+import { WishlistModule } from './wishlist/wishlist.module';
+import { AbandonedCartModule } from './abandoned-cart/abandoned-cart.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    ScheduleModule.forRoot(),
     FirebaseModule,
+    ShiprocketModule,
     PrismaModule,
     UserModule,
     UserGroupModule,
@@ -32,6 +38,8 @@ import { FirebaseModule } from './firebase/firebase.module';
     SizingModule,
     SettingsModule,
     OrderModule,
+    WishlistModule,
+    AbandonedCartModule,
   ],
   controllers: [AppController],
   providers: [AppService],

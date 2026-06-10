@@ -541,6 +541,21 @@ export class ProductService {
     return this.findOne(productId);
   }
 
+  async reorderImages(
+    productId: string,
+    order: { id: string; sortOrder: number }[],
+  ): Promise<{ ok: boolean }> {
+    await this.prisma.$transaction(
+      order.map((item) =>
+        this.prisma.productImage.updateMany({
+          where: { id: item.id, productId },
+          data: { sortOrder: item.sortOrder },
+        }),
+      ),
+    );
+    return { ok: true };
+  }
+
   async remove(id: string): Promise<{ message: string }> {
     const product = await this.prisma.product.findUnique({
       where: { id },
