@@ -116,6 +116,8 @@ model User {
   notifications       Notification[]
   wishlistItems       WishlistItem[]
   abandonedCart       AbandonedCart?
+  backInStockAlerts   BackInStockAlert[]
+  npsSurveyResponses  NpsSurveyResponse[]
 
   @@index([role])
 }
@@ -253,6 +255,10 @@ model Product {
   /** 1–100 = percentage off list `price`; null = no discount */
   discountPercent Int?
   isAvailable   Boolean          @default(true)
+  slug           String?          @unique @db.VarChar(256)
+  gstRate        Decimal          @default(0.18) @db.Decimal(4, 4)
+  metaTitle      String?          @db.VarChar(256)
+  metaDescription String?         @db.VarChar(512)
   categoryId     String?
   category       ProductCategory?              @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   subcategoryId  String?
@@ -267,6 +273,8 @@ model Product {
   orderItems    OrderItem[]
   reviews       ProductReview[]
   wishlistItems WishlistItem[]
+  backInStockAlerts BackInStockAlert[]
+  bundles       BundleProduct[]
 
   @@index([categoryId])
   @@index([subcategoryId])
@@ -458,6 +466,12 @@ model Order {
   awbCode           String?
   courierName       String?
   trackingUrl       String?     @db.Text
+  gstRate           Decimal     @default(0.18) @db.Decimal(4, 4)
+  cgst              Decimal     @default(0) @db.Decimal(10, 2)
+  sgst              Decimal     @default(0) @db.Decimal(10, 2)
+  igst              Decimal     @default(0) @db.Decimal(10, 2)
+  taxableAmount     Decimal     @default(0) @db.Decimal(10, 2)
+  affiliateCode     String?     @db.VarChar(64)
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
   items             OrderItem[]
@@ -608,4 +622,125 @@ model AbandonedCart {
   createdAt   DateTime  @default(now())
 
   @@index([updatedAt])
+}
+
+// ─── Webhook Idempotency ───────────────────────────────────────────────────────
+model ProcessedWebhookEvent {
+  id          String   @id // Razorpay event id (e.g. pay_xxx or rfnd_xxx)
+  source      String   @default("razorpay") // razorpay | shiprocket
+  processedAt DateTime @default(now())
+
+  @@index([source])
+}
+
+// ─── Back-in-Stock Alerts ─────────────────────────────────────────────────────
+model BackInStockAlert {
+  id         String    @id @default(uuid())
+  productId  String
+  product    Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email      String
+  size       String?   @db.VarChar(32)
+  notifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([productId, email, size])
+  @@index([productId])
+  @@index([notifiedAt])
+}
+
+// ─── Banners / Homepage CMS ───────────────────────────────────────────────────
+model Banner {
+  id        String    @id @default(uuid())
+  title     String
+  subtitle  String?
+  imageUrl  String    @db.Text
+  linkUrl   String?   @db.Text
+  position  String    @default("hero") // hero | mid | footer
+  isActive  Boolean   @default(true)
+  sortOrder Int       @default(0)
+  startsAt  DateTime?
+  endsAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([position, isActive])
+  @@index([startsAt, endsAt])
+}
+
+// ─── Flash Sales ──────────────────────────────────────────────────────────────
+model FlashSale {
+  id              String   @id @default(uuid())
+  title           String
+  discountPercent Int
+  startsAt        DateTime
+  endsAt          DateTime
+  isActive        Boolean  @default(true)
+  productIds      Json // string[] of product IDs
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([startsAt, endsAt])
+  @@index([isActive])
+}
+
+// ─── NPS Survey ───────────────────────────────────────────────────────────────
+model NpsSurveyResponse {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderId   String   @unique
+  score     Int // 0-10
+  comment   String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([score])
+}
+
+// ─── Product Bundles / Combos ─────────────────────────────────────────────────
+
+model Bundle {
+  id            String          @id @default(uuid())
+  name          String
+  description   String?
+  discountType  String          @default("PERCENT") // PERCENT | FLAT
+  discountValue Decimal         @db.Decimal(10, 2)
+  minItems      Int             @default(2)
+  isActive      Boolean         @default(true)
+  startsAt      DateTime?
+  endsAt        DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  products      BundleProduct[]
+
+  @@index([isActive])
+}
+
+model BundleProduct {
+  id        String  @id @default(uuid())
+  bundleId  String
+  productId String
+  bundle    Bundle  @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([bundleId, productId])
+  @@index([bundleId])
+  @@index([productId])
+}
+
+// ─── Affiliate / UTM Tracking ─────────────────────────────────────────────────
+model AffiliateClick {
+  id        String   @id @default(uuid())
+  code      String // affiliate/UTM code
+  source    String? // utm_source
+  medium    String? // utm_medium
+  campaign  String? // utm_campaign
+  ip        String?  @db.VarChar(64)
+  orderId   String? // set when click leads to order
+  userId    String?
+  createdAt DateTime @default(now())
+
+  @@index([code])
+  @@index([orderId])
 }

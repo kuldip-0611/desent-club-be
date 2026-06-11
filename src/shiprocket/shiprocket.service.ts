@@ -298,6 +298,53 @@ export class ShiprocketService implements OnModuleInit {
     };
   }
 
+  // ─── Serviceability ───────────────────────────────────────────────────────────
+
+  async checkServiceability(
+    pincode: string,
+    weight = 500,
+  ): Promise<{
+    cod: boolean;
+    prepaid: boolean;
+    couriers: Array<{ name: string; etd: string; cod: boolean }>;
+  }> {
+    const headers = await this.authHeader();
+    const warehousePincode =
+      this.config.get<string>('SHIPROCKET_WAREHOUSE_PINCODE') ?? '400001';
+
+    const { data } = await this.http.post<{
+      data?: {
+        available_courier_companies?: Array<{
+          courier_name: string;
+          estimated_delivery_days: string;
+          cod: number;
+        }>;
+      };
+    }>(
+      '/courier/serviceability/',
+      {
+        pickup_postcode: warehousePincode,
+        delivery_postcode: pincode,
+        weight,
+        cod: 1,
+      },
+      { headers },
+    );
+
+    const companies = data?.data?.available_courier_companies ?? [];
+    const couriers = companies.map((c) => ({
+      name: c.courier_name,
+      etd: c.estimated_delivery_days,
+      cod: c.cod === 1,
+    }));
+
+    return {
+      cod: couriers.some((c) => c.cod),
+      prepaid: couriers.length > 0,
+      couriers,
+    };
+  }
+
   // ─── Generate Manifest & Label (optional helpers) ─────────────────────────────
 
   async generateManifest(shiprocketOrderId: string): Promise<void> {

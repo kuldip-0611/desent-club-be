@@ -31,6 +31,7 @@ import { UpdateReturnStatusDto } from './dto/update-return-status.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import type { RazorpayWebhookEvent } from './dto/razorpay-webhook.dto';
 import { OrderService } from './order.service';
+import { ShiprocketService } from '../shiprocket/shiprocket.service';
 
 @ApiTags('Orders')
 @ApiBearerAuth()
@@ -40,7 +41,23 @@ export class OrderController {
   constructor(
     private readonly orderService: OrderService,
     private readonly config: ConfigService,
+    private readonly shiprocketService: ShiprocketService,
   ) {}
+
+  // ── Public: COD serviceability check ──────────────────────────────────────
+
+  @Get('serviceability')
+  @ApiOperation({ summary: 'Check COD/prepaid serviceability for a pincode' })
+  checkServiceability(
+    @Query('pincode') pincode: string,
+    @Query('weight') weight?: string,
+  ) {
+    if (!pincode) throw new BadRequestException('pincode is required');
+    return this.shiprocketService.checkServiceability(
+      pincode,
+      weight ? Number(weight) : 500,
+    );
+  }
 
   // ── Public webhooks (no JWT guard) ─────────────────────────────────────────
 
@@ -159,16 +176,18 @@ export class OrderController {
   }
 
   @Get('orders/my/:id/invoice')
-  @ApiOperation({ summary: 'Download HTML invoice for an order' })
-  @Header('Content-Type', 'text/html; charset=utf-8')
+  @ApiOperation({ summary: 'Download PDF invoice for an order' })
   async downloadInvoice(
     @Request() req: { user: { sub: string } },
     @Param('id') id: string,
     @Res() res: Response,
   ) {
-    const html = await this.orderService.generateInvoiceHtml(id, req.user.sub);
-    res.setHeader('Content-Disposition', `inline; filename="invoice-${id.slice(-8).toUpperCase()}.html"`);
-    res.send(html);
+    const pdf = await this.orderService.generateInvoicePdf(id, req.user.sub);
+    const filename = `invoice-${id.slice(-8).toUpperCase()}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdf.length);
+    res.end(pdf);
   }
 
   @Post('orders/my/:id/reviews')
@@ -179,6 +198,16 @@ export class OrderController {
     @Body() dto: CreateReviewsDto,
   ) {
     return this.orderService.submitReviews(req.user.sub, id, dto);
+  }
+
+  @Post('orders/my/:id/nps')
+  @ApiOperation({ summary: 'Submit NPS survey for a delivered order' })
+  submitNps(
+    @Request() req: { user: { sub: string } },
+    @Param('id') id: string,
+    @Body() body: { score: number; comment?: string },
+  ) {
+    return this.orderService.submitNpsSurvey(req.user.sub, id, body.score, body.comment);
   }
 
   @Get('admin/orders')

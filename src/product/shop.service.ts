@@ -151,6 +151,8 @@ export class ShopService {
             OR: [
               { name: { contains: search } },
               { description: { contains: search } },
+              { color: { contains: search } },
+              { fabric: { contains: search } },
             ],
           }
         : {}),
@@ -356,24 +358,50 @@ export class ShopService {
   }
 
   async getHomeData() {
-    const [allCategories, featured, newest, bestSellers] = await Promise.all([
+    const now = new Date();
+
+    const [allCategories, featured, newest, bestSellers, cmsBanners] = await Promise.all([
       this.listCategories(),
       this.listProducts({ page: 1, limit: 8, sort: 'featured' }),
       this.listProducts({ page: 1, limit: 8, sort: 'newest' }),
       this.listProducts({ page: 1, limit: 8, sort: 'price-high' }),
+      // Fetch active hero banners from CMS
+      this.prisma.banner.findMany({
+        where: {
+          isActive: true,
+          position: 'hero',
+          AND: [
+            { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
+            { OR: [{ endsAt: null }, { endsAt: { gte: now } }] },
+          ],
+        },
+        orderBy: { sortOrder: 'asc' },
+        take: 4,
+      }),
     ]);
+
     const categories = allCategories
       .filter((category) => category.productCount > 0)
       .sort((a, b) => b.productCount - a.productCount);
-    const banners = categories
-      .filter((category) => Boolean(category.image))
-      .slice(0, 4)
-      .map((category) => ({
-        title: category.name,
-        subtitle: 'Premium essentials curated from live catalog',
-        image: category.image,
-        href: `/products?category=${category.slug}`,
-      }));
+
+    // Use CMS banners if any exist, otherwise fall back to category-derived banners
+    const banners =
+      cmsBanners.length > 0
+        ? cmsBanners.map((b) => ({
+            title: b.title,
+            subtitle: b.subtitle ?? '',
+            image: b.imageUrl,
+            href: b.linkUrl ?? '/products',
+          }))
+        : categories
+            .filter((category) => Boolean(category.image))
+            .slice(0, 4)
+            .map((category) => ({
+              title: category.name,
+              subtitle: 'Premium essentials curated from live catalog',
+              image: category.image,
+              href: `/products?category=${category.slug}`,
+            }));
 
     return {
       banners,

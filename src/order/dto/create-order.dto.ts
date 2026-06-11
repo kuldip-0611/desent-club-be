@@ -63,4 +63,9 @@ export class CreateOrderDto {
   @IsOptional()
   @IsIn(['COD', 'ONLINE'])
   paymentMethod?: 'COD' | 'ONLINE';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  affiliateCode?: string;
 }

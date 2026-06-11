@@ -1,5 +1,7 @@
 import {
   BadRequestException,
+  forwardRef,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -18,6 +20,7 @@ import { existsSync, unlink } from 'fs';
 import { join } from 'path';
 import { promisify } from 'util';
 import { PrismaService } from '../prisma/prisma.service';
+import { BackInStockService } from '../back-in-stock/back-in-stock.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { ListProductsQueryDto } from './dto/list-products-query.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -179,7 +182,11 @@ type FabricRowInput = {
 
 @Injectable()
 export class ProductService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => BackInStockService))
+    private readonly backInStockService: BackInStockService,
+  ) {}
 
   async findAllForAdmin(
     query: ListProductsQueryDto = {},
@@ -187,15 +194,28 @@ export class ProductService {
     const page = Math.max(1, Number(query.page ?? 1));
     const limit = Math.min(100, Math.max(1, Number(query.limit ?? 20)));
     const search = String(query.search ?? '').trim();
-    const where: Prisma.ProductWhereInput = search
+    const searchWhere: Prisma.ProductWhereInput = search
       ? {
           OR: [
             { name: { contains: search } },
             { description: { contains: search } },
+            { color: { contains: search } },
+            { fabric: { contains: search } },
             { category: { is: { name: { contains: search } } } },
           ],
         }
       : {};
+
+    const stockWhere: Prisma.ProductWhereInput =
+      query.stockStatus === 'OUT_OF_STOCK'
+        ? { quantity: 0 }
+        : query.stockStatus === 'LOW_STOCK'
+        ? { quantity: { gt: 0, lte: 5 } }
+        : query.stockStatus === 'IN_STOCK'
+        ? { quantity: { gt: 5 } }
+        : {};
+
+    const where: Prisma.ProductWhereInput = { AND: [searchWhere, stockWhere] };
 
     const [rows, total, available, lowStock] = await this.prisma.$transaction([
       this.prisma.product.findMany({
@@ -280,6 +300,15 @@ export class ProductService {
       })) ?? [];
     const imageColors = this.parseImageColorsJson(dto.imageColors, images.length);
 
+    // Generate unique slug from name
+    const baseSlug = dto.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    let slug = baseSlug;
+    let slugCounter = 0;
+    while (await this.prisma.product.findUnique({ where: { slug } })) {
+      slugCounter++;
+      slug = `${baseSlug}-${slugCounter}`;
+    }
+
     const created = await this.prisma.$transaction(async (tx) => {
       // Insert product row first; nested variant create can hit a Prisma/MySQL edge case.
       const product = await tx.product.create({
@@ -295,6 +324,7 @@ export class ProductService {
           categoryId: categoryIdNormalized,
           subcategoryId: subcategoryIdForCreate,
           isAvailable: dto.isAvailable,
+          slug,
         },
       });
 
@@ -346,11 +376,24 @@ export class ProductService {
     await this.ensureProductExists(id);
     const beforeCats = await this.prisma.product.findUniqueOrThrow({
       where: { id },
-      select: { categoryId: true, subcategoryId: true },
+      select: { categoryId: true, subcategoryId: true, quantity: true },
     });
+    const previousQuantity = beforeCats.quantity;
 
     const data: Prisma.ProductUncheckedUpdateInput = {};
-    if (dto.name !== undefined) data.name = dto.name;
+    if (dto.name !== undefined) {
+      data.name = dto.name;
+      // Regenerate slug when name changes
+      const baseSlug = dto.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      let slug = baseSlug;
+      let slugCounter = 0;
+      // Exclude the current product from uniqueness check
+      while (await this.prisma.product.findFirst({ where: { slug, NOT: { id } } })) {
+        slugCounter++;
+        slug = `${baseSlug}-${slugCounter}`;
+      }
+      data.slug = slug;
+    }
     if (dto.description !== undefined) data.description = dto.description;
     if (dto.price !== undefined) data.price = new Prisma.Decimal(dto.price);
     if (dto.audience !== undefined) data.audience = dto.audience;
@@ -467,6 +510,11 @@ export class ProductService {
       data,
       include: adminProductInclude,
     });
+
+    // Trigger back-in-stock notifications when quantity goes from 0 to >0
+    if (previousQuantity === 0 && updated.quantity > 0) {
+      this.backInStockService.notifySubscribers(id).catch(() => undefined);
+    }
 
     return this.toResponse(updated);
   }

@@ -1,5 +1,11 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+
+export enum StockStatus {
+  OUT_OF_STOCK = 'OUT_OF_STOCK',
+  LOW_STOCK = 'LOW_STOCK',
+  IN_STOCK = 'IN_STOCK',
+}
 
 export class ListProductsQueryDto {
   @IsOptional()
@@ -18,4 +24,8 @@ export class ListProductsQueryDto {
   @IsOptional()
   @IsString()
   search?: string;
+
+  @IsOptional()
+  @IsEnum(StockStatus)
+  stockStatus?: StockStatus;
 }

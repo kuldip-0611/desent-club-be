@@ -18,12 +18,17 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationService } from '../notification/notification.service';
 import { CouponService } from '../coupon/coupon.service';
 import { ShiprocketService } from '../shiprocket/shiprocket.service';
+import { MailService } from '../mail/mail.service';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { CreateReviewsDto } from './dto/create-reviews.dto';
 import { UpdateReturnStatusDto } from './dto/update-return-status.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
+import {
+  resolveSupportEmail,
+  resolveSupportPhoneDisplay,
+} from '../common/support.constants';
 import {
   canTransition,
   RETURN_WINDOW_DAYS,
@@ -40,11 +45,20 @@ export class OrderService {
     private readonly notification: NotificationService,
     private readonly couponService: CouponService,
     private readonly shiprocket: ShiprocketService,
+    private readonly mail: MailService,
   ) {
     this.razorpay = new Razorpay({
       key_id: this.config.getOrThrow<string>('RAZORPAY_KEY_ID'),
       key_secret: this.config.getOrThrow<string>('RAZORPAY_KEY_SECRET'),
     });
+  }
+
+  private get supportEmail(): string {
+    return resolveSupportEmail(this.config.get<string>('SUPPORT_EMAIL'));
+  }
+
+  private get supportPhoneDisplay(): string {
+    return resolveSupportPhoneDisplay(this.config.get<string>('SUPPORT_PHONE_DISPLAY'));
   }
 
   async createOrder(
@@ -156,7 +170,8 @@ export class OrderService {
 
     const taxable = Prisma.Decimal.max(subtotal.sub(discountAmount), new Prisma.Decimal(0));
     const shipping = subtotal.gt(1999) ? new Prisma.Decimal(0) : new Prisma.Decimal(99);
-    const gst = taxable.mul(0.18).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP);
+    const gstBreakup = this.calculateGst(taxable);
+    const gst = gstBreakup.igst; // inter-state default
     const total = taxable.add(shipping).add(gst);
     const amountPaise = Math.round(total.toNumber() * 100);
 
@@ -190,6 +205,11 @@ export class OrderService {
           subtotal,
           discountAmount,
           total,
+          taxableAmount: taxable,
+          cgst: gstBreakup.cgst,
+          sgst: gstBreakup.sgst,
+          igst: gstBreakup.igst,
+          affiliateCode: dto.affiliateCode ?? null,
           couponId,
           shippingAddress: shippingAddress ?? Prisma.JsonNull,
           notes: dto.notes,
@@ -248,10 +268,39 @@ export class OrderService {
         total: Number(order.total),
         shippingAddress: order.shippingAddress as Record<string, string>,
       });
+      if (order.user.email) {
+        this.mail
+          .sendOrderConfirmation({
+            to: order.user.email,
+            name: order.user.name,
+            orderId: order.id,
+            items: order.items.map((i) => ({
+              name: i.product.name,
+              size: i.size,
+              color: i.color,
+              quantity: i.quantity,
+              unitPrice: Number(i.unitPrice),
+              total: Number(i.total),
+            })),
+            subtotal: Number(order.subtotal),
+            discountAmount: Number(order.discountAmount),
+            total: Number(order.total),
+            paymentMethod: 'COD' as 'COD' | 'ONLINE',
+            shippingAddress: order.shippingAddress as Record<string, string>,
+          })
+          .catch((err: Error) => console.error('[Mail]', err?.message));
+      }
 
       // Admin alert + low-stock check (fire-and-forget)
       this.notification.sendAdminOrderAlert('new_order', order.id, order.user.name, Number(order.total)).catch(() => undefined);
       this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name }))).catch(() => undefined);
+
+      // Track affiliate click if code provided
+      if (dto.affiliateCode) {
+        this.prisma.affiliateClick.create({
+          data: { code: dto.affiliateCode, orderId: order.id, userId },
+        }).catch(() => undefined);
+      }
 
       return {
         orderId: order.id,
@@ -274,6 +323,11 @@ export class OrderService {
         subtotal,
         discountAmount,
         total,
+        taxableAmount: taxable,
+        cgst: gstBreakup.cgst,
+        sgst: gstBreakup.sgst,
+        igst: gstBreakup.igst,
+        affiliateCode: dto.affiliateCode ?? null,
         couponId,
         shippingAddress: shippingAddress ?? Prisma.JsonNull,
         notes: dto.notes,
@@ -291,6 +345,13 @@ export class OrderService {
         },
       },
     });
+
+    // Track affiliate click if code provided
+    if (dto.affiliateCode) {
+      this.prisma.affiliateClick.create({
+        data: { code: dto.affiliateCode, orderId: order.id, userId },
+      }).catch(() => undefined);
+    }
 
     return {
       orderId: order.id,
@@ -391,6 +452,28 @@ export class OrderService {
       total: Number(order.total),
       shippingAddress: order.shippingAddress as Record<string, unknown> | null,
     });
+    if (order.user.email) {
+      this.mail
+        .sendOrderConfirmation({
+            to: order.user.email,
+            name: order.user.name,
+            orderId: payment.orderId,
+            items: order.items.map((i) => ({
+              name: i.product.name,
+              size: i.size,
+              color: i.color,
+              quantity: i.quantity,
+              unitPrice: Number(i.unitPrice),
+              total: Number(i.total),
+            })),
+            subtotal: Number(order.subtotal),
+            discountAmount: Number(order.discountAmount),
+            total: Number(order.total),
+            paymentMethod: 'ONLINE' as 'COD' | 'ONLINE',
+            shippingAddress: order.shippingAddress as Record<string, string>,
+          })
+        .catch((err: Error) => console.error('[Mail]', err?.message));
+    }
 
     // Admin alert + low-stock check
     this.notification.sendAdminOrderAlert('new_order', payment.orderId, order.user.name, Number(order.total)).catch(() => undefined);
@@ -447,6 +530,12 @@ export class OrderService {
     if (event === 'payment.captured') {
       const entity = payload.payment?.entity;
       if (!entity) return;
+
+      // Idempotency check
+      const eventKey = entity.id;
+      const alreadyProcessed = await this.prisma.processedWebhookEvent.findUnique({ where: { id: eventKey } });
+      if (alreadyProcessed) { console.log(`[Razorpay Webhook] Duplicate event ${eventKey} — skipping`); return; }
+      await this.prisma.processedWebhookEvent.create({ data: { id: eventKey, source: 'razorpay' } });
 
       const payment = await this.prisma.payment.findUnique({
         where: { razorpayOrderId: entity.order_id },
@@ -511,6 +600,28 @@ export class OrderService {
         total: Number(order.total),
         shippingAddress: order.shippingAddress as Record<string, unknown> | null,
       });
+      if (order.user.email) {
+        this.mail
+          .sendOrderConfirmation({
+              to: order.user.email,
+              name: order.user.name,
+              orderId: payment.orderId,
+              items: order.items.map((i) => ({
+                name: i.product.name,
+                size: i.size,
+                color: i.color,
+                quantity: i.quantity,
+                unitPrice: Number(i.unitPrice),
+                total: Number(i.total),
+              })),
+              subtotal: Number(order.subtotal),
+              discountAmount: Number(order.discountAmount),
+              total: Number(order.total),
+              paymentMethod: 'ONLINE' as 'COD' | 'ONLINE',
+              shippingAddress: order.shippingAddress as Record<string, string>,
+            })
+          .catch((err: Error) => console.error('[Mail]', err?.message));
+      }
       this.notification.sendAdminOrderAlert('new_order', payment.orderId, order.user.name, Number(order.total)).catch(() => undefined);
       this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name }))).catch(() => undefined);
 
@@ -534,6 +645,12 @@ export class OrderService {
     if (event === 'refund.processed') {
       const entity = payload.refund?.entity;
       if (!entity) return;
+
+      // Idempotency check
+      const refundKey = entity.id;
+      const alreadyProcessedRefund = await this.prisma.processedWebhookEvent.findUnique({ where: { id: refundKey } });
+      if (alreadyProcessedRefund) { console.log(`[Razorpay Webhook] Duplicate event ${refundKey} — skipping`); return; }
+      await this.prisma.processedWebhookEvent.create({ data: { id: refundKey, source: 'razorpay' } });
 
       const payment = await this.prisma.payment.findFirst({
         where: { razorpayPaymentId: entity.payment_id },
@@ -925,7 +1042,7 @@ export class OrderService {
             items: {
               include: { product: { select: { id: true, name: true } } },
             },
-            user: { select: { id: true, name: true, phone: true, fcmToken: true } },
+            user: { select: { id: true, name: true, phone: true, fcmToken: true, email: true } },
           },
         },
       },
@@ -1045,6 +1162,19 @@ export class OrderService {
           { returnId, orderId: returnRequest.orderId },
         )
         .catch(() => undefined);
+
+      if (!isExchange && order.user.email) {
+        this.mail
+          .sendReturnApproved({
+            to: order.user.email,
+            name: order.user.name,
+            orderId: returnRequest.orderId,
+            awbCode: null,
+            courierName: null,
+            returnType: 'RETURN',
+          })
+          .catch((err: Error) => console.error('[Mail]', err?.message));
+      }
     }
 
     // ── RECEIVED: restore stock for returned items ────────────────────────────
@@ -1110,6 +1240,18 @@ export class OrderService {
           { returnId, orderId: returnRequest.orderId },
         )
         .catch(() => undefined);
+
+      if (returnRequest.order.user.email && refundInfo?.amount) {
+        this.mail
+          .sendRefundProcessed({
+            to: returnRequest.order.user.email,
+            name: returnRequest.order.user.name,
+            orderId: returnRequest.orderId,
+            amount: refundInfo.amount / 100,
+            paymentMethod: 'ONLINE',
+          })
+          .catch((err: Error) => console.error('[Mail]', err?.message));
+      }
     }
 
     // ── EXCHANGED: validate stock, deduct new size, dispatch via Shiprocket ─────
@@ -1486,9 +1628,29 @@ export class OrderService {
     // Push notification: order status changed
     const statusUser = await this.prisma.user.findUnique({
       where: { id: order.userId },
-      select: { fcmToken: true },
+      select: { fcmToken: true, email: true },
     });
     this.notification.notifyOrderStatusChanged(statusUser?.fcmToken, orderId, status);
+
+    // ── Email notifications ──────────────────────────────────────────────
+    if (statusUser?.email) {
+      if (status === OrderStatus.SHIPPED) {
+        this.mail
+          .sendOrderShipped({
+            to: statusUser.email,
+            name: order.user.name,
+            orderId,
+            awbCode: order.awbCode ?? '',
+            courierName: order.courierName ?? '',
+            trackingUrl: order.trackingUrl?.startsWith('sr_shipment:') ? undefined : (order.trackingUrl ?? undefined),
+          })
+          .catch((err: Error) => console.error('[Mail]', err?.message));
+      } else if (status === OrderStatus.DELIVERED) {
+        this.mail
+          .sendOrderDelivered({ to: statusUser.email, name: order.user.name, orderId })
+          .catch((err: Error) => console.error('[Mail]', err?.message));
+      }
+    }
 
     // ── Shiprocket integration ───────────────────────────────────────────
     if (status === OrderStatus.PROCESSING) {
@@ -1733,9 +1895,15 @@ export class OrderService {
     // Notify user of status change
     const user = await this.prisma.user.findUnique({
       where: { id: order.userId },
-      select: { fcmToken: true },
+      select: { fcmToken: true, email: true, name: true },
     });
     this.notification.notifyOrderStatusChanged(user?.fcmToken, order.id, newStatus);
+
+    if (user?.email && newStatus === OrderStatus.DELIVERED) {
+      this.mail
+        .sendOrderDelivered({ to: user.email, name: user.name, orderId: order.id })
+        .catch((err: Error) => console.error('[Mail]', err?.message));
+    }
 
     console.log(`[Shiprocket Webhook] Order ${order.id} → ${newStatus} (AWB ${awb} / "${srStatus}")`);
   }
@@ -1788,6 +1956,41 @@ export class OrderService {
 
   // ─── Invoice HTML Generator ───────────────────────────────────────────────
 
+  async generateInvoicePdf(orderId: string, userId: string): Promise<Buffer> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+      include: {
+        items: { include: { product: { select: { name: true } } } },
+        payment: true,
+        coupon: { select: { code: true } },
+        user: { select: { name: true, email: true } },
+      },
+    });
+    if (!order) throw new Error('Order not found');
+
+    const html = this.buildInvoiceHtml(order);
+
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const puppeteer = require('puppeteer') as typeof import('puppeteer');
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(html, { waitUntil: 'load' });
+      const pdf = await page.pdf({
+        format: 'A4',
+        printBackground: true,
+        margin: { top: '0', right: '0', bottom: '0', left: '0' },
+      });
+      return Buffer.from(pdf);
+    } finally {
+      await browser.close();
+    }
+  }
+
+  /** @deprecated kept for backward compat — use generateInvoicePdf */
   async generateInvoiceHtml(orderId: string, userId: string): Promise<string> {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, userId },
@@ -1909,7 +2112,7 @@ export class OrderService {
     </table>
 
     <div class="footer">
-      Thank you for shopping with Desent Club! For support, contact support@desenclub.com<br/>
+      Thank you for shopping with Desent Club! For support, contact ${this.supportEmail} (${this.supportPhoneDisplay})<br/>
       This is a computer-generated invoice and does not require a signature.
     </div>
   </div>
@@ -1933,5 +2136,470 @@ export class OrderService {
         await this.notification.sendAdminLowStockAlert(item.name, product.quantity);
       }
     }
+  }
+
+  // ─── GST Helper ───────────────────────────────────────────────────────────
+
+  calculateGst(
+    taxable: Prisma.Decimal,
+    gstRate = 0.18,
+    isInterState = true,
+  ): { cgst: Prisma.Decimal; sgst: Prisma.Decimal; igst: Prisma.Decimal; total: Prisma.Decimal } {
+    const gstTotal = taxable.mul(gstRate).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+    if (isInterState) {
+      return {
+        cgst: new Prisma.Decimal(0),
+        sgst: new Prisma.Decimal(0),
+        igst: gstTotal,
+        total: gstTotal,
+      };
+    }
+    const half = gstTotal.div(2).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+    return {
+      cgst: half,
+      sgst: half,
+      igst: new Prisma.Decimal(0),
+      total: gstTotal,
+    };
+  }
+
+  // ─── NPS Survey ────────────────────────────────────────────────────────────
+
+  async submitNpsSurvey(
+    userId: string,
+    orderId: string,
+    score: number,
+    comment?: string,
+  ): Promise<{ message: string }> {
+    if (score < 0 || score > 10) {
+      throw new BadRequestException('Score must be between 0 and 10');
+    }
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId, status: OrderStatus.DELIVERED },
+    });
+    if (!order) {
+      throw new NotFoundException('Delivered order not found');
+    }
+    await this.prisma.npsSurveyResponse.upsert({
+      where: { orderId },
+      update: { score, comment: comment ?? null },
+      create: { userId, orderId, score, comment: comment ?? null },
+    });
+    return { message: 'NPS survey submitted' };
+  }
+
+  // ── Invoice HTML builder ────────────────────────────────────────────────────
+  private buildInvoiceHtml(order: {
+    id: string;
+    createdAt: Date;
+    subtotal: unknown;
+    total: unknown;
+    discountAmount: unknown;
+    shippingAddress: unknown;
+    cgst?: unknown;
+    sgst?: unknown;
+    igst?: unknown;
+    taxableAmount?: unknown;
+    payment: { status: string; method: string } | null;
+    coupon: { code: string } | null;
+    user: { name: string; email: string | null };
+    items: Array<{
+      product: { name: string };
+      size?: string | null;
+      color?: string | null;
+      quantity: number;
+      unitPrice: unknown;
+      total: unknown;
+    }>;
+  }): string {
+    const ref = order.id.slice(-8).toUpperCase();
+    const dateStr = new Date(order.createdAt).toLocaleDateString('en-IN', {
+      day: 'numeric', month: 'long', year: 'numeric',
+    });
+    const addr = order.shippingAddress as Record<string, string> | null;
+    const isPaid = order.payment?.status === 'PAID';
+    const isCod = order.payment?.method === 'COD';
+
+    const subtotal = Number(order.subtotal ?? 0);
+    const total = Number(order.total ?? 0);
+    const discount = Number(order.discountAmount ?? 0);
+    const cgst = Number(order.cgst ?? 0);
+    const sgst = Number(order.sgst ?? 0);
+    const igst = Number(order.igst ?? 0);
+    const taxableAmount = Number(order.taxableAmount ?? 0);
+
+    const rows = order.items.map((i) => `
+      <tr>
+        <td class="item-name">${i.product.name}${i.size ? `<span class="variant"> / ${i.size}</span>` : ''}${i.color ? `<span class="variant"> / ${i.color}</span>` : ''}</td>
+        <td class="center">${i.quantity}</td>
+        <td class="right">₹${Number(i.unitPrice).toFixed(2)}</td>
+        <td class="right bold">₹${Number(i.total).toFixed(2)}</td>
+      </tr>`).join('');
+
+    const gstRows = (cgst > 0 || igst > 0) ? `
+      ${taxableAmount > 0 ? `<tr><td>Taxable Amount</td><td class="right">₹${taxableAmount.toFixed(2)}</td></tr>` : ''}
+      ${cgst > 0 ? `<tr><td>CGST (9%)</td><td class="right">₹${cgst.toFixed(2)}</td></tr>` : ''}
+      ${sgst > 0 ? `<tr><td>SGST (9%)</td><td class="right">₹${sgst.toFixed(2)}</td></tr>` : ''}
+      ${igst > 0 ? `<tr><td>IGST (18%)</td><td class="right">₹${igst.toFixed(2)}</td></tr>` : ''}
+    ` : '';
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Invoice #${ref} — Desent Club</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+      background: #f1f5f9;
+      color: #1e293b;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    .page {
+      width: 210mm;
+      min-height: 297mm;
+      margin: 0 auto;
+      background: #ffffff;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header gradient banner ── */
+    .header {
+      background: linear-gradient(135deg, #4f46e5 0%, #6366f1 40%, #818cf8 100%);
+      padding: 36px 44px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      position: relative;
+      overflow: hidden;
+    }
+    .header::before {
+      content: '';
+      position: absolute;
+      top: -40px; right: -40px;
+      width: 180px; height: 180px;
+      border-radius: 50%;
+      background: rgba(255,255,255,.08);
+    }
+    .header::after {
+      content: '';
+      position: absolute;
+      bottom: -60px; left: 30%;
+      width: 240px; height: 240px;
+      border-radius: 50%;
+      background: rgba(255,255,255,.05);
+    }
+
+    /* Logo wordmark */
+    .logo {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      z-index: 1;
+    }
+    .logo-wordmark {
+      font-size: 30px;
+      font-weight: 900;
+      color: #ffffff;
+      letter-spacing: -0.5px;
+      line-height: 1;
+    }
+    .logo-wordmark span {
+      color: rgba(255,255,255,.6);
+    }
+    .logo-tagline {
+      font-size: 10px;
+      font-weight: 500;
+      color: rgba(255,255,255,.7);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    /* Invoice label block */
+    .inv-meta {
+      text-align: right;
+      z-index: 1;
+    }
+    .inv-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,.65);
+    }
+    .inv-number {
+      font-size: 26px;
+      font-weight: 800;
+      color: #ffffff;
+      margin: 4px 0 6px;
+      line-height: 1;
+    }
+    .inv-date {
+      font-size: 12px;
+      color: rgba(255,255,255,.75);
+      margin-bottom: 10px;
+    }
+
+    /* Status badge */
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .badge-paid    { background: #dcfce7; color: #15803d; }
+    .badge-cod     { background: #fef3c7; color: #92400e; }
+    .badge-pending { background: #fee2e2; color: #b91c1c; }
+
+    /* ── Body ── */
+    .body { padding: 36px 44px; flex: 1; }
+
+    /* Address grid */
+    .addr-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 32px;
+    }
+    .addr-card {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 18px 20px;
+    }
+    .addr-label {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #94a3b8;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .addr-label::before {
+      content: '';
+      display: inline-block;
+      width: 3px; height: 14px;
+      background: #6366f1;
+      border-radius: 2px;
+    }
+    .addr-card p { font-size: 12.5px; line-height: 1.75; color: #334155; }
+    .addr-card strong { color: #0f172a; font-weight: 600; }
+
+    /* ── Items table ── */
+    .section-label {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #94a3b8;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .section-label::before {
+      content: '';
+      display: inline-block;
+      width: 3px; height: 14px;
+      background: #6366f1;
+      border-radius: 2px;
+    }
+
+    table { width: 100%; border-collapse: collapse; }
+
+    .items-table thead tr {
+      background: linear-gradient(90deg, #4f46e5, #6366f1);
+    }
+    .items-table thead th {
+      padding: 11px 12px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #ffffff;
+    }
+    .items-table thead th:first-child { text-align: left; border-radius: 8px 0 0 0; }
+    .items-table thead th:last-child  { border-radius: 0 8px 0 0; }
+
+    .items-table tbody tr { border-bottom: 1px solid #f1f5f9; }
+    .items-table tbody tr:last-child { border-bottom: none; }
+    .items-table tbody tr:nth-child(even) { background: #fafbff; }
+
+    .item-name { font-size: 13px; font-weight: 500; color: #1e293b; padding: 12px 12px; }
+    .variant { font-size: 11px; color: #94a3b8; font-weight: 400; }
+    td { font-size: 13px; color: #334155; }
+    td.center { text-align: center; padding: 12px 12px; }
+    td.right   { text-align: right;  padding: 12px 12px; }
+    td.bold    { font-weight: 600; color: #1e293b; }
+
+    /* ── Totals ── */
+    .totals-wrap {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 20px;
+      margin-bottom: 32px;
+    }
+    .totals-table {
+      width: 280px;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .totals-table tr td {
+      padding: 9px 16px;
+      font-size: 13px;
+      color: #475569;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .totals-table tr td:last-child { text-align: right; font-weight: 600; color: #1e293b; }
+    .totals-table tr:last-child td { border-bottom: none; }
+    .totals-table .discount td { color: #ef4444; }
+    .totals-table .gst-row td { color: #64748b; font-size: 12px; }
+    .totals-table .grand td {
+      background: linear-gradient(90deg, #4f46e5, #6366f1);
+      color: #ffffff !important;
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    /* ── Decorative divider ── */
+    .divider {
+      height: 3px;
+      background: linear-gradient(90deg, #4f46e5, #818cf8, transparent);
+      border-radius: 2px;
+      margin: 0 44px 0;
+    }
+
+    /* ── Footer ── */
+    .footer {
+      padding: 24px 44px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+    .footer-note {
+      font-size: 10.5px;
+      color: #94a3b8;
+      line-height: 1.7;
+      max-width: 340px;
+    }
+    .footer-note strong { color: #64748b; }
+    .footer-brand {
+      text-align: right;
+      font-size: 18px;
+      font-weight: 900;
+      color: #6366f1;
+      letter-spacing: -0.3px;
+    }
+    .footer-brand span { color: #c7d2fe; }
+    .footer-brand small {
+      display: block;
+      font-size: 9px;
+      font-weight: 500;
+      color: #cbd5e1;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <div class="header">
+    <div class="logo">
+      <div class="logo-wordmark">Desent<span> Club</span></div>
+      <div class="logo-tagline">Premium Fashion</div>
+    </div>
+    <div class="inv-meta">
+      <div class="inv-label">Tax Invoice</div>
+      <div class="inv-number">#${ref}</div>
+      <div class="inv-date">${dateStr}</div>
+      <span class="badge ${isPaid ? 'badge-paid' : isCod ? 'badge-cod' : 'badge-pending'}">
+        ${isPaid ? '✓ Paid' : isCod ? 'Cash on Delivery' : 'Payment Pending'}
+      </span>
+    </div>
+  </div>
+
+  <!-- BODY -->
+  <div class="body">
+
+    <!-- Addresses -->
+    <div class="addr-grid">
+      <div class="addr-card">
+        <div class="addr-label">Billed To</div>
+        <p><strong>${order.user.name}</strong></p>
+        ${order.user.email ? `<p>${order.user.email}</p>` : ''}
+      </div>
+      <div class="addr-card">
+        <div class="addr-label">Shipping Address</div>
+        ${addr ? `
+          <p><strong>${addr.fullName ?? ''}</strong></p>
+          <p>${addr.line1 ?? ''}${addr.line2 ? ', ' + addr.line2 : ''}</p>
+          <p>${addr.city ?? ''}, ${addr.state ?? ''} — ${addr.pincode ?? ''}</p>
+          ${addr.phone ? `<p>${addr.phone}</p>` : ''}
+        ` : '<p>—</p>'}
+      </div>
+    </div>
+
+    <!-- Items -->
+    <div class="section-label">Order Items</div>
+    <table class="items-table">
+      <thead>
+        <tr>
+          <th style="text-align:left">Item Description</th>
+          <th style="text-align:center">Qty</th>
+          <th style="text-align:right">Unit Price</th>
+          <th style="text-align:right">Amount</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+
+    <!-- Totals -->
+    <div class="totals-wrap">
+      <table class="totals-table">
+        <tr><td>Subtotal</td><td>₹${subtotal.toFixed(2)}</td></tr>
+        ${discount > 0 ? `<tr class="discount"><td>Discount${order.coupon ? ` (${order.coupon.code})` : ''}</td><td>− ₹${discount.toFixed(2)}</td></tr>` : ''}
+        <tr><td>Shipping</td><td style="color:#16a34a">Free</td></tr>
+        ${gstRows}
+        <tr class="grand"><td>Total Payable</td><td>₹${total.toFixed(2)}</td></tr>
+      </table>
+    </div>
+
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <div class="footer-note">
+      <strong>Thank you for shopping with Desent Club!</strong><br/>
+      For support, contact <strong>${this.supportEmail}</strong> · <strong>${this.supportPhoneDisplay}</strong><br/>
+      This is a system-generated invoice and does not require a physical signature.
+    </div>
+    <div class="footer-brand">
+      Desent<span> Club</span>
+      <small>Premium Fashion</small>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>`;
   }
 }

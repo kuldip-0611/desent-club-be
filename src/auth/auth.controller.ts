@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { UserRole } from '@prisma/client';
 import { Request } from 'express';
 import {
@@ -67,6 +68,7 @@ export class AuthController {
     return this.authService.userLogin(dto);
   }
 
+  @Throttle({ short: { ttl: 60000, limit: 3 } })
   @ApiOperation({ summary: 'Send OTP to email' })
   @ApiBody({ type: SendEmailOtpDto })
   @ApiOkResponse({ type: MessageResponseDto })
@@ -75,6 +77,7 @@ export class AuthController {
     return this.authService.sendEmailOtp(dto);
   }
 
+  @Throttle({ short: { ttl: 60000, limit: 3 } })
   @ApiOperation({ summary: 'Resend OTP to email' })
   @ApiBody({ type: SendEmailOtpDto })
   @ApiOkResponse({ type: MessageResponseDto })
@@ -92,6 +95,7 @@ export class AuthController {
     return this.authService.verifyEmailOtp(dto);
   }
 
+  @Throttle({ short: { ttl: 60000, limit: 3 } })
   @ApiOperation({ summary: 'Send OTP to phone' })
   @ApiBody({ type: SendPhoneOtpDto })
   @ApiOkResponse({ type: MessageResponseDto })
@@ -100,6 +104,7 @@ export class AuthController {
     return this.authService.sendPhoneOtp(dto);
   }
 
+  @Throttle({ short: { ttl: 60000, limit: 3 } })
   @ApiOperation({ summary: 'Resend OTP to phone' })
   @ApiBody({ type: SendPhoneOtpDto })
   @ApiOkResponse({ type: MessageResponseDto })

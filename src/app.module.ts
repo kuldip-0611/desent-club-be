@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
@@ -19,11 +21,20 @@ import { FirebaseModule } from './firebase/firebase.module';
 import { ShiprocketModule } from './shiprocket/shiprocket.module';
 import { WishlistModule } from './wishlist/wishlist.module';
 import { AbandonedCartModule } from './abandoned-cart/abandoned-cart.module';
+import { BackInStockModule } from './back-in-stock/back-in-stock.module';
+import { BannerModule } from './banner/banner.module';
+import { FlashSaleModule } from './flash-sale/flash-sale.module';
+import { MailModule } from './mail/mail.module';
+import { BundleModule } from './bundle/bundle.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
+    ThrottlerModule.forRoot([
+      { name: 'short', ttl: 60000, limit: 10 },
+      { name: 'long', ttl: 3600000, limit: 100 },
+    ]),
     FirebaseModule,
     ShiprocketModule,
     PrismaModule,
@@ -40,8 +51,16 @@ import { AbandonedCartModule } from './abandoned-cart/abandoned-cart.module';
     OrderModule,
     WishlistModule,
     AbandonedCartModule,
+    BackInStockModule,
+    BannerModule,
+    FlashSaleModule,
+    MailModule,
+    BundleModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+  ],
 })
 export class AppModule {}

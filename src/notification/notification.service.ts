@@ -264,6 +264,81 @@ export class NotificationService {
     this.send(to, subject, text, html).catch(() => undefined);
   }
 
+  async sendBackInStockEmail(to: string, productName: string, productId: string): Promise<void> {
+    const siteUrl = this.configService.get('NEXT_PUBLIC_SITE_URL') ?? 'https://desenclub.com';
+    const subject = `${productName} is back in stock — Desent Club`;
+    const html = `
+      <p>Great news! <strong>${productName}</strong> is back in stock at Desent Club.</p>
+      <p>Grab it before it sells out again!</p>
+      <a href="${siteUrl}/products/${productId}" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-top:16px;">Shop Now →</a>
+    `;
+    const text = `${productName} is back in stock at Desent Club. Visit ${siteUrl}/products/${productId} to shop now.`;
+    await this.send(to, subject, text, html);
+  }
+
+  // ─── Admin Broadcast ─────────────────────────────────────────────────────
+
+  /**
+   * Send a broadcast notification to ALL users:
+   * 1. Persist to each user's notification inbox
+   * 2. Push via FCM to all users who have an FCM token
+   * 3. Optionally send email to all users with an email address
+   */
+  async broadcastToAll(payload: {
+    title: string;
+    body: string;
+    type?: string;
+    data?: Record<string, unknown>;
+    sendEmail?: boolean;
+  }): Promise<{ sent: number; pushed: number; emailed: number }> {
+    const { title, body, type = 'general', data, sendEmail = false } = payload;
+
+    const users = await this.prisma.user.findMany({
+      select: { id: true, email: true, fcmToken: true, name: true },
+    });
+
+    // 1. Persist to inbox for every user
+    await this.prisma.notification.createMany({
+      data: users.map((u) => ({ userId: u.id, title, body, type, data: (data ?? {}) as any })),
+      skipDuplicates: true,
+    });
+
+    // 2. FCM push to users with tokens
+    const tokens = users.map((u) => u.fcmToken).filter((t): t is string => Boolean(t));
+    let pushed = 0;
+    if (tokens.length > 0) {
+      await this.firebase.sendToTokens(tokens, { title, body }).catch((err) => {
+        this.logger.error(`Broadcast push failed: ${err}`);
+      });
+      pushed = tokens.length;
+    }
+
+    // 3. Optional email blast
+    let emailed = 0;
+    if (sendEmail) {
+      const emailUsers = users.filter((u) => u.email);
+      for (const u of emailUsers) {
+        const html = `
+          <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto">
+            <div style="background:linear-gradient(135deg,#4f46e5,#6366f1);padding:28px 32px;border-radius:12px 12px 0 0">
+              <p style="color:#fff;font-size:22px;font-weight:800;margin:0">Desent Club</p>
+            </div>
+            <div style="background:#fff;padding:28px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
+              <h2 style="color:#1e293b;font-size:18px;margin:0 0 12px">${title}</h2>
+              <p style="color:#475569;font-size:14px;line-height:1.7;margin:0 0 24px">${body}</p>
+              <a href="${this.configService.get('NEXT_PUBLIC_SITE_URL') ?? 'https://desentclub.com'}" style="background:#4f46e5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600">Visit Desent Club →</a>
+              <p style="margin-top:24px;font-size:11px;color:#94a3b8">You received this because you have an account at Desent Club.</p>
+            </div>
+          </div>`;
+        await this.send(u.email!, title, body, html).catch(() => undefined);
+        emailed++;
+      }
+    }
+
+    this.logger.log(`Broadcast sent: ${users.length} inbox, ${pushed} push, ${emailed} email`);
+    return { sent: users.length, pushed, emailed };
+  }
+
   private async pushNewCouponToAll(coupon: CouponPayload): Promise<void> {
     const users = await this.prisma.user.findMany({
       where: { fcmToken: { not: null } },
