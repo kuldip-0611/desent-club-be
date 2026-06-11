@@ -1,6 +1,3 @@
-import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, unlinkSync } from 'fs';
-import { extname, join } from 'path';
 import {
   BadRequestException,
   Body,
@@ -16,7 +13,6 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
 import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -24,38 +20,16 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { SkipThrottle } from '@nestjs/throttler';
 import { BannerService, CreateBannerDto, UpdateBannerDto } from './banner.service';
-import { IMAGE_MIME_REGEX, UPLOAD_LIMITS } from '../common/upload-settings';
-
-const BANNERS_UPLOAD_DIR = join(process.cwd(), 'uploads', 'banners');
-
-function ensureBannerUploadDir() {
-  if (!existsSync(BANNERS_UPLOAD_DIR)) mkdirSync(BANNERS_UPLOAD_DIR, { recursive: true });
-  return BANNERS_UPLOAD_DIR;
-}
-
-const bannerMulterOptions = {
-  storage: diskStorage({
-    destination: (_req: unknown, _file: unknown, cb: (err: null, dest: string) => void) => {
-      cb(null, ensureBannerUploadDir());
-    },
-    filename: (_req: unknown, file: Express.Multer.File, cb: (err: null, name: string) => void) => {
-      cb(null, `${randomUUID()}${extname(file.originalname).toLowerCase() || '.jpg'}`);
-    },
-  }),
-  limits: { fileSize: UPLOAD_LIMITS.productImageBytes },
-  fileFilter: (_req: unknown, file: Express.Multer.File, cb: (err: Error | null, accept: boolean) => void) => {
-    if (!IMAGE_MIME_REGEX.test(file.mimetype)) {
-      cb(new BadRequestException('Only JPEG, PNG, GIF, or WebP images are allowed'), false);
-      return;
-    }
-    cb(null, true);
-  },
-};
+import { StorageService } from '../storage/storage.service';
+import { bannerImageMulterOptions } from '../common/memory-multer.config';
 
 @ApiTags('Banners')
 @Controller()
 export class BannerController {
-  constructor(private readonly bannerService: BannerService) {}
+  constructor(
+    private readonly bannerService: BannerService,
+    private readonly storage: StorageService,
+  ) {}
 
   // ── Public ─────────────────────────────────────────────────────────────────
 
@@ -82,23 +56,25 @@ export class BannerController {
 
   /**
    * POST /admin/banners
-   * Accepts multipart/form-data with an optional `image` file.
-   * All other fields sent as form fields (not JSON body).
+   * Accepts multipart/form-data with an optional `image` file uploaded to S3.
    */
   @Post('admin/banners')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
   @ApiConsumes('multipart/form-data')
-  @ApiOperation({ summary: '[Admin] Create banner (supports image upload)' })
-  @UseInterceptors(FileInterceptor('image', bannerMulterOptions))
-  create(
+  @ApiOperation({ summary: '[Admin] Create banner (image uploaded to S3)' })
+  @UseInterceptors(FileInterceptor('image', bannerImageMulterOptions))
+  async create(
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() body: Record<string, string>,
   ) {
-    const imageUrl = file
-      ? `/uploads/banners/${file.filename}`
-      : body.imageUrl ?? '';
+    let imageUrl = body.imageUrl ?? '';
+
+    if (file) {
+      const result = await this.storage.upload(file, 'banners');
+      imageUrl = result.url;
+    }
 
     if (!imageUrl) throw new BadRequestException('An image file or imageUrl is required');
 
@@ -119,15 +95,15 @@ export class BannerController {
 
   /**
    * PATCH /admin/banners/:id
-   * Accepts multipart/form-data — same as create, image is optional on update.
+   * Image is optional on update — only replaces if a new file is uploaded.
    */
   @Patch('admin/banners/:id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
   @ApiConsumes('multipart/form-data')
-  @ApiOperation({ summary: '[Admin] Update banner (supports image upload)' })
-  @UseInterceptors(FileInterceptor('image', bannerMulterOptions))
+  @ApiOperation({ summary: '[Admin] Update banner (image uploaded to S3)' })
+  @UseInterceptors(FileInterceptor('image', bannerImageMulterOptions))
   async update(
     @Param('id') id: string,
     @UploadedFile() file: Express.Multer.File | undefined,
@@ -145,13 +121,13 @@ export class BannerController {
     if (body.endsAt !== undefined) dto.endsAt = body.endsAt || undefined;
 
     if (file) {
-      // Delete old image file if it was a local upload
+      // Delete old S3 object (best-effort)
       const existing = await this.bannerService.findById(id);
-      if (existing?.imageUrl?.startsWith('/uploads/banners/')) {
-        const oldPath = join(process.cwd(), existing.imageUrl);
-        try { unlinkSync(oldPath); } catch { /* ignore if missing */ }
+      if (existing?.imageUrl) {
+        await this.storage.delete(existing.imageUrl).catch(() => undefined);
       }
-      dto.imageUrl = `/uploads/banners/${file.filename}`;
+      const result = await this.storage.upload(file, 'banners');
+      dto.imageUrl = result.url;
     } else if (body.imageUrl !== undefined) {
       dto.imageUrl = body.imageUrl;
     }
@@ -174,11 +150,9 @@ export class BannerController {
   @ApiBearerAuth()
   @ApiOperation({ summary: '[Admin] Delete banner' })
   async remove(@Param('id') id: string) {
-    // Clean up local image file before deleting record
     const existing = await this.bannerService.findById(id);
-    if (existing?.imageUrl?.startsWith('/uploads/banners/')) {
-      const filePath = join(process.cwd(), existing.imageUrl);
-      try { unlinkSync(filePath); } catch { /* ignore */ }
+    if (existing?.imageUrl) {
+      await this.storage.delete(existing.imageUrl).catch(() => undefined);
     }
     return this.bannerService.remove(id);
   }

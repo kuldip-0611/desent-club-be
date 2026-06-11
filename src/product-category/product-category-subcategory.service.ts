@@ -3,30 +3,17 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { existsSync, unlinkSync } from 'fs';
-import { join } from 'path';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { CreateProductCategorySubcategoryDto } from './dto/create-product-category-subcategory.dto';
 import { UpdateProductCategorySubcategoryDto } from './dto/update-product-category-subcategory.dto';
 
 @Injectable()
 export class ProductCategorySubcategoryService {
-  constructor(private readonly prisma: PrismaService) {}
-
-  private imagePath(filename: string): string {
-    return `/uploads/subcategories/${filename}`;
-  }
-
-  private deleteUploadedImage(path: string | null | undefined): void {
-    if (!path || !path.startsWith('/uploads/subcategories/')) return;
-    const absolutePath = join(process.cwd(), path.replace(/^\//, ''));
-    if (!existsSync(absolutePath)) return;
-    try {
-      unlinkSync(absolutePath);
-    } catch {
-      // best-effort cleanup only
-    }
-  }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   private normalizeSlug(value: string): string {
     return value
@@ -38,9 +25,7 @@ export class ProductCategorySubcategoryService {
 
   private async ensureParentCategory(categoryId: string): Promise<void> {
     const row = await this.prisma.productCategory.findUnique({ where: { id: categoryId } });
-    if (!row) {
-      throw new NotFoundException('Category not found');
-    }
+    if (!row) throw new NotFoundException('Category not found');
   }
 
   async findByCategoryId(categoryId: string) {
@@ -56,26 +41,27 @@ export class ProductCategorySubcategoryService {
     dto: CreateProductCategorySubcategoryDto,
     image?: Express.Multer.File,
   ) {
-    if (!image) {
-      throw new BadRequestException('Subcategory image is required');
-    }
+    if (!image) throw new BadRequestException('Subcategory image is required');
+
     await this.ensureParentCategory(categoryId);
     const slug = this.normalizeSlug(dto.slug);
-    if (!slug) {
-      throw new BadRequestException('Subcategory slug is invalid');
-    }
+    if (!slug) throw new BadRequestException('Subcategory slug is invalid');
+
     const clash = await this.prisma.productCategorySubcategory.findUnique({
       where: { categoryId_slug: { categoryId, slug } },
     });
     if (clash) {
       throw new BadRequestException('A subcategory with this slug already exists in this category');
     }
+
+    const { url } = await this.storage.upload(image, 'subcategories');
+
     return this.prisma.productCategorySubcategory.create({
       data: {
         categoryId,
         slug,
         name: dto.name.trim(),
-        image: this.imagePath(image.filename),
+        image: url,
         sortOrder: dto.sortOrder ?? 0,
         isActive: dto.isActive ?? true,
       },
@@ -84,9 +70,7 @@ export class ProductCategorySubcategoryService {
 
   async findOne(id: string) {
     const row = await this.prisma.productCategorySubcategory.findUnique({ where: { id } });
-    if (!row) {
-      throw new NotFoundException('Subcategory not found');
-    }
+    if (!row) throw new NotFoundException('Subcategory not found');
     return row;
   }
 
@@ -106,9 +90,7 @@ export class ProductCategorySubcategoryService {
 
     if (dto.slug !== undefined && dto.slug !== null && String(dto.slug).trim() !== '') {
       const slug = this.normalizeSlug(dto.slug);
-      if (!slug) {
-        throw new BadRequestException('Subcategory slug is invalid');
-      }
+      if (!slug) throw new BadRequestException('Subcategory slug is invalid');
       const exists = await this.prisma.productCategorySubcategory.findFirst({
         where: { categoryId: current.categoryId, slug, NOT: { id } },
       });
@@ -117,29 +99,30 @@ export class ProductCategorySubcategoryService {
       }
       data.slug = slug;
     }
-    if (dto.name != null && String(dto.name).trim() !== '') {
-      data.name = dto.name.trim();
-    }
-    if (dto.sortOrder !== undefined && dto.sortOrder !== null) {
-      data.sortOrder = dto.sortOrder;
-    }
-    if (dto.isActive !== undefined && dto.isActive !== null) {
-      data.isActive = dto.isActive;
-    }
+    if (dto.name != null && String(dto.name).trim() !== '') data.name = dto.name.trim();
+    if (dto.sortOrder !== undefined && dto.sortOrder !== null) data.sortOrder = dto.sortOrder;
+    if (dto.isActive !== undefined && dto.isActive !== null) data.isActive = dto.isActive;
+
     if (image) {
-      this.deleteUploadedImage(current.image);
-      data.image = this.imagePath(image.filename);
+      const { url } = await this.storage.upload(image, 'subcategories');
+      data.image = url;
     }
 
-    return this.prisma.productCategorySubcategory.update({
-      where: { id },
-      data,
-    });
+    const updated = await this.prisma.productCategorySubcategory.update({ where: { id }, data });
+
+    // Delete old S3 image after successful update
+    if (image && current.image) {
+      await this.storage.delete(current.image).catch(() => undefined);
+    }
+
+    return updated;
   }
 
   async remove(id: string) {
     const row = await this.findOne(id);
     await this.prisma.productCategorySubcategory.delete({ where: { id } });
-    this.deleteUploadedImage(row.image);
+    if (row.image) {
+      await this.storage.delete(row.image).catch(() => undefined);
+    }
   }
 }

@@ -1,43 +1,9 @@
-import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync } from 'fs';
-import type { Request } from 'express';
-import { diskStorage } from 'multer';
-import type { FileFilterCallback } from 'multer';
-import { extname, join } from 'path';
-import { IMAGE_MIME_REGEX, UPLOAD_LIMITS } from '../common/upload-settings';
+/**
+ * Re-exports the shared memory-storage multer options for product images.
+ * Files are buffered in RAM and streamed directly to S3 — nothing is written
+ * to disk. The PRODUCTS_UPLOAD_SUBDIR constant is kept for backward compat
+ * (used as the S3 folder name).
+ */
+export { productImageMulterOptions } from '../common/memory-multer.config';
 
-export const PRODUCTS_UPLOAD_SUBDIR = 'products';
-
-export function ensureProductUploadDir(): string {
-  const dir = join(process.cwd(), 'uploads', PRODUCTS_UPLOAD_SUBDIR);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-  return dir;
-}
-
-export const productImageMulterOptions = {
-  storage: diskStorage({
-    destination: (_req, _file, cb) => {
-      cb(null, ensureProductUploadDir());
-    },
-    filename: (_req, file, cb) => {
-      cb(
-        null,
-        `${randomUUID()}${extname(file.originalname).toLowerCase() || '.jpg'}`,
-      );
-    },
-  }),
-  limits: { fileSize: UPLOAD_LIMITS.productImageBytes },
-  fileFilter: (
-    _req: Request,
-    file: Express.Multer.File,
-    cb: FileFilterCallback,
-  ) => {
-    if (!IMAGE_MIME_REGEX.test(file.mimetype)) {
-      cb(new Error('Only JPEG, PNG, GIF, or WebP images are allowed'));
-      return;
-    }
-    cb(null, true);
-  },
-};
+export const PRODUCTS_UPLOAD_SUBDIR = 'products' as const;

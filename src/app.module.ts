@@ -26,10 +26,12 @@ import { BannerModule } from './banner/banner.module';
 import { FlashSaleModule } from './flash-sale/flash-sale.module';
 import { MailModule } from './mail/mail.module';
 import { BundleModule } from './bundle/bundle.module';
+import { StorageModule } from './storage/storage.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    StorageModule,
     ScheduleModule.forRoot(),
     ThrottlerModule.forRoot([
       { name: 'short', ttl: 60000, limit: 10 },

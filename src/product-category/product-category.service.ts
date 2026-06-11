@@ -3,30 +3,17 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { existsSync, unlinkSync } from 'fs';
-import { join } from 'path';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { CreateProductCategoryDto } from './dto/create-product-category.dto';
 import { UpdateProductCategoryDto } from './dto/update-product-category.dto';
 
 @Injectable()
 export class ProductCategoryService {
-  constructor(private readonly prisma: PrismaService) {}
-
-  private imagePath(filename: string): string {
-    return `/uploads/categories/${filename}`;
-  }
-
-  private deleteUploadedImage(path: string | null | undefined): void {
-    if (!path || !path.startsWith('/uploads/categories/')) return;
-    const absolutePath = join(process.cwd(), path.replace(/^\//, ''));
-    if (!existsSync(absolutePath)) return;
-    try {
-      unlinkSync(absolutePath);
-    } catch {
-      // best-effort cleanup only
-    }
-  }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   findAll() {
     return this.prisma.productCategory.findMany({
@@ -52,11 +39,14 @@ export class ProductCategoryService {
     if (clash) {
       throw new BadRequestException('A category with this slug already exists');
     }
+
+    const { url } = await this.storage.upload(image, 'categories');
+
     return this.prisma.productCategory.create({
       data: {
         slug,
         name: dto.name.trim(),
-        image: this.imagePath(image.filename),
+        image: url,
         isActive: dto.isActive ?? true,
       },
     });
@@ -73,29 +63,38 @@ export class ProductCategoryService {
         throw new BadRequestException('A category with this slug already exists');
       }
     }
+
     const data: {
       slug?: string;
       name?: string;
       image?: string | null;
       isActive?: boolean;
     } = {};
+
     if (dto.slug != null) data.slug = dto.slug.trim().toLowerCase();
     if (dto.name != null) data.name = dto.name.trim();
-    if (image) data.image = this.imagePath(image.filename);
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
-    const updated = await this.prisma.productCategory.update({
-      where: { id },
-      data,
-    });
-    if (image && current.image && current.image !== updated.image) {
-      this.deleteUploadedImage(current.image);
+
+    if (image) {
+      const { url } = await this.storage.upload(image, 'categories');
+      data.image = url;
     }
+
+    const updated = await this.prisma.productCategory.update({ where: { id }, data });
+
+    // Delete old S3 image after successful update
+    if (image && current.image) {
+      await this.storage.delete(current.image).catch(() => undefined);
+    }
+
     return updated;
   }
 
   async remove(id: string) {
     const existing = await this.findOne(id);
     await this.prisma.productCategory.delete({ where: { id } });
-    this.deleteUploadedImage(existing.image);
+    if (existing.image) {
+      await this.storage.delete(existing.image).catch(() => undefined);
+    }
   }
 }

@@ -4,13 +4,10 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { join } from 'path';
 import { AppModule } from './app.module';
-import { ensureCategoryUploadDir } from './product-category/multer.config';
-import { ensureProductUploadDir } from './product/multer.config';
 import { ensureProfileUploadDir } from './user/multer.config';
 
 async function bootstrap() {
-  ensureProductUploadDir();
-  ensureCategoryUploadDir();
+  // Profile photos still stored locally (avatars are small & user-scoped)
   ensureProfileUploadDir();
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {

@@ -16,17 +16,12 @@ import {
   SizeMeasurementValue,
 } from '@prisma/client';
 import { randomUUID } from 'crypto';
-import { existsSync, unlink } from 'fs';
-import { join } from 'path';
-import { promisify } from 'util';
 import { PrismaService } from '../prisma/prisma.service';
 import { BackInStockService } from '../back-in-stock/back-in-stock.service';
+import { StorageService } from '../storage/storage.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { ListProductsQueryDto } from './dto/list-products-query.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
-import { PRODUCTS_UPLOAD_SUBDIR } from './multer.config';
-
-const unlinkAsync = promisify(unlink);
 
 const variantAdminInclude = {
   catalogSize: {
@@ -186,6 +181,7 @@ export class ProductService {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => BackInStockService))
     private readonly backInStockService: BackInStockService,
+    private readonly storage: StorageService,
   ) {}
 
   async findAllForAdmin(
@@ -292,12 +288,16 @@ export class ProductService {
     }
     await this.assertVariantsMatchMeasurements(measurementAttrIds, resolvedVariants);
 
-    const images =
-      files?.map((file, index) => ({
-        path: `/uploads/${PRODUCTS_UPLOAD_SUBDIR}/${file.filename}`,
-        sortOrder: index,
-        color: '',
-      })) ?? [];
+    // Upload images to S3 (parallel)
+    const uploadedImages = files && files.length > 0
+      ? await Promise.all(
+          files.map(async (file, index) => {
+            const result = await this.storage.upload(file, 'products');
+            return { path: result.url, sortOrder: index, color: '' };
+          }),
+        )
+      : [];
+    const images = uploadedImages;
     const imageColors = this.parseImageColorsJson(dto.imageColors, images.length);
 
     // Generate unique slug from name
@@ -537,12 +537,17 @@ export class ProductService {
     const startOrder = (existingMax._max.sortOrder ?? -1) + 1;
     const imageColors = this.parseImageColorsJson(imageColorsRaw, files.length);
 
+    // Upload all files to S3 first, then persist URLs in DB
+    const uploadedPaths = await Promise.all(
+      files.map((file) => this.storage.upload(file, 'products').then((r) => r.url)),
+    );
+
     await this.prisma.$transaction(
-      files.map((file, i) =>
+      uploadedPaths.map((path, i) =>
         this.prisma.productImage.create({
           data: {
             productId,
-            path: `/uploads/${PRODUCTS_UPLOAD_SUBDIR}/${file.filename}`,
+            path,
             sortOrder: startOrder + i,
             color: imageColors[i] ?? '',
           },
@@ -1040,11 +1045,9 @@ export class ProductService {
   }
 
   private async unlinkStoredFile(publicPath: string): Promise<void> {
-    const relative = publicPath.replace(/^\/uploads\//, '');
-    const absolute = join(process.cwd(), 'uploads', relative);
-    if (existsSync(absolute)) {
-      await unlinkAsync(absolute);
-    }
+    if (!publicPath) return;
+    // Delete from S3 (best-effort — log only, never throw)
+    await this.storage.delete(publicPath).catch(() => undefined);
   }
 
   private resolveColorInput(
