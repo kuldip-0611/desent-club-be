@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as nodemailer from 'nodemailer';
-import type SMTPTransport from 'nodemailer/lib/smtp-transport';
+import { Resend } from 'resend';
 import { buildOrderConfirmationEmail } from './templates/order-confirmation.template';
 import { buildOrderShippedEmail } from './templates/order-shipped.template';
 import { buildOrderDeliveredEmail } from './templates/order-delivered.template';
@@ -12,55 +11,62 @@ import { buildOrderCancelledEmail } from './templates/order-cancelled.template';
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
-  private transporter: nodemailer.Transporter | null = null;
+  private resend: Resend | null = null;
 
   constructor(private readonly config: ConfigService) {}
 
-  // ── Private helpers ─────────────────────────────────────────────────────────
+  // ── Private helpers ──────────────────────────────────────────────────────────
 
   private get from(): string {
-    return (
-      this.config.get<string>('SMTP_FROM')?.trim() ||
-      this.config.get<string>('MAIL_FROM')?.trim() ||
-      `Desent Club <noreply@desentclub.com>`
-    );
+    return this.config.get<string>('RESEND_FROM') ?? 'Desent Club <testinfo@disentclub.com>';
   }
 
   private get siteUrl(): string {
-    return (this.config.get<string>('NEXT_PUBLIC_SITE_URL') ?? 'https://desentclub.com').replace(/\/$/, '');
+    return (this.config.get<string>('NEXT_PUBLIC_SITE_URL') ?? 'https://disentclub.com').replace(/\/$/, '');
   }
 
-  private getTransporter(): nodemailer.Transporter {
-    if (this.transporter) return this.transporter;
-
-    const host = this.config.get<string>('SMTP_HOST')?.trim();
-    if (!host) {
-      // Return a no-op transporter for dev (logs but doesn't send)
-      this.transporter = nodemailer.createTransport({ jsonTransport: true });
-      return this.transporter;
-    }
-
-    const port = Number(this.config.get<string>('SMTP_PORT') ?? 587);
-    const secure = this.config.get<string>('SMTP_SECURE') === 'true' || port === 465;
-    const user = this.config.get<string>('SMTP_USER')?.trim();
-    const passRaw = this.config.get<string>('SMTP_PASS')?.trim();
-    const pass = passRaw?.replace(/\s+/g, '');
-
-    const options: SMTPTransport.Options = { host, port, secure };
-    if (user && pass) options.auth = { user, pass };
-
-    this.transporter = nodemailer.createTransport(options);
-    return this.transporter;
+  private getResend(): Resend | null {
+    if (this.resend) return this.resend;
+    const apiKey = this.config.get<string>('RESEND_API_KEY')?.trim();
+    if (!apiKey || apiKey === 'YOUR_NEW_KEY_HERE') return null;
+    this.resend = new Resend(apiKey);
+    return this.resend;
   }
 
-  private async send(to: string, subject: string, html: string): Promise<void> {
-    const host = this.config.get<string>('SMTP_HOST')?.trim();
-    if (!host) {
-      this.logger.log(`[DEV] Email to ${to} — "${subject}" (set SMTP_HOST to send real email)`);
+  async sendRaw(opts: {
+    to: string;
+    subject: string;
+    html: string;
+    text?: string;
+  }): Promise<void> {
+    await this.send(opts.to, opts.subject, opts.html, opts.text);
+  }
+
+  private async send(
+    to: string,
+    subject: string,
+    html: string,
+    text?: string,
+  ): Promise<void> {
+    const resend = this.getResend();
+    if (!resend) {
+      this.logger.log(
+        `[DEV] Email to ${to} — "${subject}" (set RESEND_API_KEY to send real email)\n${text ?? ''}`,
+      );
       return;
     }
     try {
-      await this.getTransporter().sendMail({ from: this.from, to, subject, html });
+      const { error } = await resend.emails.send({
+        from: this.from,
+        to,
+        subject,
+        html,
+        ...(text ? { text } : {}),
+      });
+      if (error) {
+        this.logger.error(`Resend error to ${to}: ${JSON.stringify(error)}`);
+        throw new Error(error.message);
+      }
       this.logger.log(`Email sent to ${to} — "${subject}"`);
     } catch (err) {
       this.logger.error(`Failed to send email to ${to}: ${(err as Error)?.message}`);

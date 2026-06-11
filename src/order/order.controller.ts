@@ -278,4 +278,24 @@ export class OrderController {
   ) {
     return this.orderService.markCodRemitted(id, remittanceRef);
   }
+
+  // ── Bulk Order Management ─────────────────────────────────────────────────
+
+  @Patch('admin/orders/bulk/status')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @ApiOperation({ summary: '[Admin] Bulk update order statuses' })
+  bulkUpdateStatus(
+    @Body() body: { orderIds: string[]; status: OrderStatus },
+  ) {
+    return this.orderService.bulkUpdateOrderStatus(body.orderIds, body.status);
+  }
+
+  @Post('admin/orders/bulk/export')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @ApiOperation({ summary: '[Admin] Export orders as CSV' })
+  exportOrders(@Body() body: { orderIds?: string[]; status?: OrderStatus; from?: string; to?: string }) {
+    return this.orderService.exportOrdersCsv(body);
+  }
 }

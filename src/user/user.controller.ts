@@ -18,6 +18,7 @@ import {
 import { Request } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -35,6 +36,7 @@ import { UserService } from './user.service';
 
 @ApiTags('Users')
 @Controller()
+@SkipThrottle()
 export class UserController {
   constructor(
     private readonly userService: UserService,

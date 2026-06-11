@@ -1,9 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as nodemailer from 'nodemailer';
-import type SMTPTransport from 'nodemailer/lib/smtp-transport';
 import { PrismaService } from '../prisma/prisma.service';
 import { FirebaseService } from '../firebase/firebase.service';
+import { MailService } from '../mail/mail.service';
 import {
   buildDirectCouponEmail,
   buildGroupCouponEmail,
@@ -23,12 +22,12 @@ interface CouponPayload {
 @Injectable()
 export class NotificationService {
   private readonly logger = new Logger(NotificationService.name);
-  private transporter: nodemailer.Transporter | null = null;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly firebase: FirebaseService,
+    private readonly mailService: MailService,
   ) {}
 
   /**
@@ -40,15 +39,11 @@ export class NotificationService {
     this.sendToAllUsers(coupon).catch((err) => {
       this.logger.error(`Failed broadcasting new coupon email: ${err}`);
     });
-    // Push: get all FCM tokens and fan-out
     this.pushNewCouponToAll(coupon).catch((err) => {
       this.logger.error(`Failed broadcasting new coupon push: ${err}`);
     });
   }
 
-  /**
-   * Called after a coupon is directly assigned to a specific user.
-   */
   notifyUserCouponAssigned(
     user: { email: string | null; name: string | null; fcmToken?: string | null },
     coupon: CouponPayload,
@@ -69,10 +64,6 @@ export class NotificationService {
     }
   }
 
-  /**
-   * Called after a coupon is assigned to a user group.
-   * Sends an email to every group member who has an email address.
-   */
   notifyGroupMembersCouponAssigned(
     members: { email: string | null; name: string | null; fcmToken?: string | null }[],
     groupName: string,
@@ -98,7 +89,6 @@ export class NotificationService {
     }
   }
 
-  /** Order confirmation email + push after successful payment */
   notifyOrderConfirmed(payload: {
     userEmail: string | null;
     userName: string;
@@ -110,7 +100,6 @@ export class NotificationService {
     total: number;
     shippingAddress?: Record<string, unknown> | null;
   }): void {
-    // Email
     if (payload.userEmail) {
       const { subject, text, html } = buildOrderConfirmationEmail({
         userName: payload.userName,
@@ -126,7 +115,6 @@ export class NotificationService {
       });
     }
 
-    // Push
     if (payload.fcmToken) {
       this.firebase
         .sendToToken(payload.fcmToken, {
@@ -137,7 +125,6 @@ export class NotificationService {
     }
   }
 
-  /** Push notification when order status changes */
   notifyOrderStatusChanged(
     fcmToken: string | null | undefined,
     orderId: string,
@@ -157,9 +144,6 @@ export class NotificationService {
       .catch(() => undefined);
   }
 
-  // ─── Notification Inbox Helpers ──────────────────────────────────────────
-
-  /** Persist a notification to DB for a specific user and optionally push it */
   async persistAndPush(
     userId: string,
     title: string,
@@ -176,7 +160,6 @@ export class NotificationService {
     }
   }
 
-  /** List notifications for a user (max 50, newest first) */
   async listForUser(userId: string, onlyUnread = false) {
     return this.prisma.notification.findMany({
       where: { userId, ...(onlyUnread ? { isRead: false } : {}) },
@@ -185,12 +168,10 @@ export class NotificationService {
     });
   }
 
-  /** Count unread notifications */
   async countUnread(userId: string) {
     return this.prisma.notification.count({ where: { userId, isRead: false } });
   }
 
-  /** Mark one notification as read */
   async markRead(id: string, userId: string) {
     return this.prisma.notification.updateMany({
       where: { id, userId },
@@ -198,7 +179,6 @@ export class NotificationService {
     });
   }
 
-  /** Mark all notifications as read */
   async markAllRead(userId: string) {
     return this.prisma.notification.updateMany({
       where: { userId, isRead: false },
@@ -206,12 +186,9 @@ export class NotificationService {
     });
   }
 
-  /** Delete a notification */
   async deleteOne(id: string, userId: string) {
     return this.prisma.notification.deleteMany({ where: { id, userId } });
   }
-
-  // ─── Admin email alert helpers ────────────────────────────────────────────
 
   async sendAdminLowStockAlert(productName: string, qty: number): Promise<void> {
     const adminEmail = this.configService.get<string>('ADMIN_ALERT_EMAIL');
@@ -276,14 +253,6 @@ export class NotificationService {
     await this.send(to, subject, text, html);
   }
 
-  // ─── Admin Broadcast ─────────────────────────────────────────────────────
-
-  /**
-   * Send a broadcast notification to ALL users:
-   * 1. Persist to each user's notification inbox
-   * 2. Push via FCM to all users who have an FCM token
-   * 3. Optionally send email to all users with an email address
-   */
   async broadcastToAll(payload: {
     title: string;
     body: string;
@@ -297,13 +266,11 @@ export class NotificationService {
       select: { id: true, email: true, fcmToken: true, name: true },
     });
 
-    // 1. Persist to inbox for every user
     await this.prisma.notification.createMany({
       data: users.map((u) => ({ userId: u.id, title, body, type, data: (data ?? {}) as any })),
       skipDuplicates: true,
     });
 
-    // 2. FCM push to users with tokens
     const tokens = users.map((u) => u.fcmToken).filter((t): t is string => Boolean(t));
     let pushed = 0;
     if (tokens.length > 0) {
@@ -313,7 +280,6 @@ export class NotificationService {
       pushed = tokens.length;
     }
 
-    // 3. Optional email blast
     let emailed = 0;
     if (sendEmail) {
       const emailUsers = users.filter((u) => u.email);
@@ -374,40 +340,7 @@ export class NotificationService {
     text: string,
     html: string,
   ): Promise<void> {
-    const host = this.configService.get<string>('SMTP_HOST')?.trim();
-    const smtpUser = this.configService.get<string>('SMTP_USER')?.trim();
-    const from =
-      this.configService.get<string>('MAIL_FROM')?.trim() ||
-      smtpUser ||
-      'no-reply@desent.club';
-
-    if (!host) {
-      this.logger.log(
-        `[DEV] Notification to ${to} — subject: "${subject}" (set SMTP_HOST to send real mail)\n${text}`,
-      );
-      return;
-    }
-
-    const transport = this.getTransporter();
-    await transport.sendMail({ from, to, subject, text, html });
+    await this.mailService.sendRaw({ to, subject, text, html });
     this.logger.log(`Notification email sent to ${to}`);
-  }
-
-  private getTransporter(): nodemailer.Transporter {
-    if (this.transporter) return this.transporter;
-
-    const host = this.configService.getOrThrow<string>('SMTP_HOST').trim();
-    const port = Number(this.configService.get<string>('SMTP_PORT') ?? 587);
-    const secure =
-      this.configService.get<string>('SMTP_SECURE') === 'true' || port === 465;
-    const user = this.configService.get<string>('SMTP_USER')?.trim();
-    const passRaw = this.configService.get<string>('SMTP_PASS')?.trim();
-    const pass = passRaw ? passRaw.replace(/\s+/g, '') : undefined;
-
-    const options: SMTPTransport.Options = { host, port, secure };
-    if (user && pass) options.auth = { user, pass };
-
-    this.transporter = nodemailer.createTransport(options);
-    return this.transporter;
   }
 }

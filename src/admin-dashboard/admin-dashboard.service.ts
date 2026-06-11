@@ -220,4 +220,133 @@ export class AdminDashboardService {
       })),
     };
   }
+
+  // ── Customer Segments ─────────────────────────────────────────────────────
+
+  async getCustomerSegments() {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+
+    // Fetch users with order aggregates
+    const users = await this.prisma.user.findMany({
+      select: { id: true, name: true, email: true, createdAt: true },
+    });
+
+    // Fetch orders grouped by user
+    const orders = await this.prisma.order.findMany({
+      where: { status: { not: 'CANCELLED' } },
+      select: { userId: true, total: true, createdAt: true },
+    });
+
+    const ordersByUser: Record<string, { total: number; createdAt: Date }[]> = {};
+    for (const o of orders) {
+      if (!ordersByUser[o.userId]) ordersByUser[o.userId] = [];
+      ordersByUser[o.userId].push({ total: Number(o.total), createdAt: o.createdAt });
+    }
+
+    type SegmentUser = { id: string; name: string; email: string | null; createdAt: Date; orderCount: number; totalSpent: number };
+
+    const segments: Record<string, SegmentUser[]> = {
+      vip: [],
+      loyal: [],
+      atRisk: [],
+      newCustomers: [],
+      oneTimeBuyers: [],
+    };
+
+    for (const user of users) {
+      const userOrders = ordersByUser[user.id] ?? [];
+      const totalSpent = userOrders.reduce((s, o) => s + o.total, 0);
+      const orderCount = userOrders.length;
+      const last90Orders = userOrders.filter((o) => o.createdAt >= ninetyDaysAgo);
+      const isNew = user.createdAt >= thirtyDaysAgo;
+
+      const mapped: SegmentUser = { id: user.id, name: user.name, email: user.email, createdAt: user.createdAt, orderCount, totalSpent };
+
+      if (totalSpent >= 10000 || orderCount >= 5) {
+        segments.vip.push(mapped);
+      } else if (last90Orders.length >= 2) {
+        segments.loyal.push(mapped);
+      } else if (orderCount > 0 && last90Orders.length === 0) {
+        segments.atRisk.push(mapped);
+      } else if (isNew && orderCount === 0) {
+        segments.newCustomers.push(mapped);
+      } else if (orderCount === 1) {
+        segments.oneTimeBuyers.push(mapped);
+      }
+    }
+
+    return {
+      vip: { count: segments.vip.length, users: segments.vip.slice(0, 50) },
+      loyal: { count: segments.loyal.length, users: segments.loyal.slice(0, 50) },
+      atRisk: { count: segments.atRisk.length, users: segments.atRisk.slice(0, 50) },
+      newCustomers: { count: segments.newCustomers.length, users: segments.newCustomers.slice(0, 50) },
+      oneTimeBuyers: { count: segments.oneTimeBuyers.length, users: segments.oneTimeBuyers.slice(0, 50) },
+    };
+  }
+
+  // ── Sales Analytics ───────────────────────────────────────────────────────
+
+  async getSalesAnalytics(from?: string, to?: string) {
+    const start = from ? new Date(from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const end = to ? new Date(to) : new Date();
+
+    const orders = await this.prisma.order.findMany({
+      where: {
+        status: { notIn: ['CANCELLED'] },
+        createdAt: { gte: start, lte: end },
+      },
+      select: {
+        id: true,
+        total: true,
+        status: true,
+        createdAt: true,
+        items: {
+          select: {
+            quantity: true,
+            total: true,
+            product: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+
+    // Revenue by day
+    const revenueByDay: Record<string, number> = {};
+    const ordersByDay: Record<string, number> = {};
+    for (const order of orders) {
+      const day = order.createdAt.toISOString().split('T')[0];
+      revenueByDay[day] = (revenueByDay[day] ?? 0) + Number(order.total);
+      ordersByDay[day] = (ordersByDay[day] ?? 0) + 1;
+    }
+
+    // Top products
+    const productMap: Record<string, { name: string; units: number; revenue: number }> = {};
+    for (const order of orders) {
+      for (const item of order.items) {
+        const pid = item.product.id;
+        if (!productMap[pid]) productMap[pid] = { name: item.product.name, units: 0, revenue: 0 };
+        productMap[pid].units += item.quantity;
+        productMap[pid].revenue += Number(item.total);
+      }
+    }
+    const topProducts = Object.entries(productMap)
+      .map(([id, data]) => ({ id, ...data }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+
+    const totalRevenue = orders.reduce((s, o) => s + Number(o.total), 0);
+    const avgOrderValue = orders.length ? totalRevenue / orders.length : 0;
+
+    return {
+      period: { from: start, to: end },
+      totalRevenue,
+      totalOrders: orders.length,
+      avgOrderValue: Math.round(avgOrderValue),
+      revenueByDay: Object.entries(revenueByDay).map(([date, revenue]) => ({ date, revenue })),
+      ordersByDay: Object.entries(ordersByDay).map(([date, count]) => ({ date, count })),
+      topProducts,
+    };
+  }
 }

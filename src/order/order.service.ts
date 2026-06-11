@@ -19,6 +19,8 @@ import { NotificationService } from '../notification/notification.service';
 import { CouponService } from '../coupon/coupon.service';
 import { ShiprocketService } from '../shiprocket/shiprocket.service';
 import { MailService } from '../mail/mail.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
+import { ReferralService } from '../referral/referral.service';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -46,6 +48,8 @@ export class OrderService {
     private readonly couponService: CouponService,
     private readonly shiprocket: ShiprocketService,
     private readonly mail: MailService,
+    private readonly loyalty: LoyaltyService,
+    private readonly referral: ReferralService,
   ) {
     this.razorpay = new Razorpay({
       key_id: this.config.getOrThrow<string>('RAZORPAY_KEY_ID'),
@@ -302,6 +306,14 @@ export class OrderService {
         }).catch(() => undefined);
       }
 
+      // Loyalty: earn points + handle referral reward (fire-and-forget)
+      this.loyalty.earnOnOrder(userId, order.id, Number(order.total)).catch(() => undefined);
+      this.referral.completeReferral(userId, order.id).then((referrerId) => {
+        if (referrerId) {
+          this.loyalty.giveReferralBonus(referrerId, userId).catch(() => undefined);
+        }
+      }).catch(() => undefined);
+
       return {
         orderId: order.id,
         paymentMethod: 'COD',
@@ -478,6 +490,14 @@ export class OrderService {
     // Admin alert + low-stock check
     this.notification.sendAdminOrderAlert('new_order', payment.orderId, order.user.name, Number(order.total)).catch(() => undefined);
     this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name }))).catch(() => undefined);
+
+    // Loyalty: earn points + handle referral reward (fire-and-forget)
+    this.loyalty.earnOnOrder(order.userId, payment.orderId, Number(order.total)).catch(() => undefined);
+    this.referral.completeReferral(order.userId, payment.orderId).then((referrerId) => {
+      if (referrerId) {
+        this.loyalty.giveReferralBonus(referrerId, order.userId).catch(() => undefined);
+      }
+    }).catch(() => undefined);
 
     return { message: 'Payment verified successfully', orderId: payment.orderId };
   }
@@ -2601,5 +2621,63 @@ export class OrderService {
 </div>
 </body>
 </html>`;
+  }
+
+  // ── Bulk Order Management ─────────────────────────────────────────────────
+
+  async bulkUpdateOrderStatus(orderIds: string[], status: OrderStatus) {
+    if (!orderIds.length) throw new BadRequestException('No order IDs provided');
+
+    const results = await Promise.allSettled(
+      orderIds.map((id) => this.updateOrderStatus(id, status)),
+    );
+
+    const succeeded = results.filter((r) => r.status === 'fulfilled').length;
+    const failed = results.filter((r) => r.status === 'rejected').length;
+    return { succeeded, failed, total: orderIds.length };
+  }
+
+  async exportOrdersCsv(opts: {
+    orderIds?: string[];
+    status?: OrderStatus;
+    from?: string;
+    to?: string;
+  }) {
+    const where: Prisma.OrderWhereInput = {};
+    if (opts.orderIds?.length) where.id = { in: opts.orderIds };
+    if (opts.status) where.status = opts.status;
+    if (opts.from || opts.to) {
+      where.createdAt = {};
+      if (opts.from) (where.createdAt as { gte?: Date; lte?: Date }).gte = new Date(opts.from);
+      if (opts.to) (where.createdAt as { gte?: Date; lte?: Date }).lte = new Date(opts.to);
+    }
+
+    const orders = await this.prisma.order.findMany({
+      where,
+      take: 1000,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: { select: { name: true, email: true } },
+        items: { include: { product: { select: { name: true } } } },
+      },
+    });
+
+    // Build CSV
+    const header = 'Order ID,Date,Customer,Email,Items,Total,Status';
+    const rows = orders.map((o) => {
+      const itemsSummary = o.items.map((i) => `${i.product.name} x${i.quantity}`).join('; ');
+      return [
+        o.id,
+        o.createdAt.toISOString().split('T')[0],
+        o.user.name,
+        o.user.email ?? '',
+        `"${itemsSummary}"`,
+        Number(o.total).toFixed(2),
+        o.status,
+      ].join(',');
+    });
+
+    const csv = [header, ...rows].join('\n');
+    return { csv, count: orders.length };
   }
 }

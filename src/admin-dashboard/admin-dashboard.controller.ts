@@ -25,4 +25,16 @@ export class AdminDashboardController {
   analytics(@Query('period') period?: 'daily' | 'weekly' | 'monthly') {
     return this.dashboardService.getAnalytics(period ?? 'daily');
   }
+
+  @Get('customer-segments')
+  @ApiOperation({ summary: 'Get customer segments (VIP, loyal, at-risk, new, one-time)' })
+  customerSegments() {
+    return this.dashboardService.getCustomerSegments();
+  }
+
+  @Get('sales-analytics')
+  @ApiOperation({ summary: 'Detailed sales analytics with date range filter' })
+  salesAnalytics(@Query('from') from?: string, @Query('to') to?: string) {
+    return this.dashboardService.getSalesAnalytics(from, to);
+  }
 }

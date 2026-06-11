@@ -118,6 +118,9 @@ model User {
   abandonedCart       AbandonedCart?
   backInStockAlerts   BackInStockAlert[]
   npsSurveyResponses  NpsSurveyResponse[]
+  loyaltyAccount      LoyaltyAccount?
+  referralCode        ReferralCode?
+  referral            Referral?           @relation("ReferredUser")
 
   @@index([role])
 }
@@ -743,4 +746,66 @@ model AffiliateClick {
 
   @@index([code])
   @@index([orderId])
+}
+
+// ── Loyalty Points ────────────────────────────────────────────────────────────
+
+model LoyaltyAccount {
+  id           String         @id @default(uuid())
+  userId       String         @unique
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance      Int            @default(0)
+  totalEarned  Int            @default(0)
+  totalRedeemed Int           @default(0)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  transactions LoyaltyTransaction[]
+}
+
+model LoyaltyTransaction {
+  id          String           @id @default(uuid())
+  accountId   String
+  account     LoyaltyAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  type        LoyaltyTxType
+  points      Int
+  description String
+  orderId     String?
+  createdAt   DateTime         @default(now())
+
+  @@index([accountId])
+  @@index([orderId])
+}
+
+enum LoyaltyTxType {
+  EARNED
+  REDEEMED
+  EXPIRED
+  BONUS
+  REFERRAL
+  ADJUSTED
+}
+
+// ── Referral Program ──────────────────────────────────────────────────────────
+
+model ReferralCode {
+  id          String      @id @default(uuid())
+  userId      String      @unique
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  code        String      @unique @db.VarChar(20)
+  timesUsed   Int         @default(0)
+  createdAt   DateTime    @default(now())
+  referrals   Referral[]
+}
+
+model Referral {
+  id             String       @id @default(uuid())
+  referralCodeId String
+  referralCode   ReferralCode @relation(fields: [referralCodeId], references: [id], onDelete: Cascade)
+  referredUserId String       @unique
+  referredUser   User         @relation("ReferredUser", fields: [referredUserId], references: [id], onDelete: Cascade)
+  orderId        String?
+  rewardGiven    Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+
+  @@index([referralCodeId])
 }

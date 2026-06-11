@@ -27,15 +27,19 @@ import { FlashSaleModule } from './flash-sale/flash-sale.module';
 import { MailModule } from './mail/mail.module';
 import { BundleModule } from './bundle/bundle.module';
 import { StorageModule } from './storage/storage.module';
+import { LoyaltyModule } from './loyalty/loyalty.module';
+import { ReferralModule } from './referral/referral.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     StorageModule,
+    LoyaltyModule,
+    ReferralModule,
     ScheduleModule.forRoot(),
     ThrottlerModule.forRoot([
-      { name: 'short', ttl: 60000, limit: 10 },
-      { name: 'long', ttl: 3600000, limit: 100 },
+      { name: 'short', ttl: 60000, limit: 60 },
+      { name: 'long', ttl: 3600000, limit: 1000 },
     ]),
     FirebaseModule,
     ShiprocketModule,

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -49,6 +49,7 @@ export class WishlistService {
   }
 
   async addItem(userId: string, productId: string) {
+    await this.assertProductExists(productId);
     return this.prisma.wishlistItem.upsert({
       where: { userId_productId: { userId, productId } },
       create: { userId, productId },
@@ -63,18 +64,37 @@ export class WishlistService {
   }
 
   async syncItems(userId: string, productIds: string[]) {
-    // Called on login — merge localStorage ids into server wishlist
     if (!productIds.length) return;
-    const data = productIds.map((productId) => ({ userId, productId }));
+
+    const uniqueIds = [...new Set(productIds.map((id) => id.trim()).filter(Boolean))];
+    if (!uniqueIds.length) return;
+
+    const existing = await this.prisma.product.findMany({
+      where: { id: { in: uniqueIds } },
+      select: { id: true },
+    });
+    const validIds = existing.map((p) => p.id);
+    if (!validIds.length) return;
+
     await this.prisma.$transaction(
-      data.map((d) =>
+      validIds.map((productId) =>
         this.prisma.wishlistItem.upsert({
-          where: { userId_productId: { userId: d.userId, productId: d.productId } },
-          create: d,
+          where: { userId_productId: { userId, productId } },
+          create: { userId, productId },
           update: {},
         }),
       ),
     );
+  }
+
+  private async assertProductExists(productId: string): Promise<void> {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId.trim() },
+      select: { id: true },
+    });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
   }
 
   async clearAll(userId: string) {
