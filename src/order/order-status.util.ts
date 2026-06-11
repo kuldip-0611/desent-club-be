@@ -15,4 +15,4 @@ export const USER_CANCELLABLE: OrderStatus[] = ['PENDING', 'CONFIRMED', 'PROCESS
 export const canTransition = (from: OrderStatus, to: OrderStatus): boolean =>
   ORDER_STATUS_FLOW[from]?.includes(to) ?? false;
 
-export const RETURN_WINDOW_DAYS = 7;
+export const RETURN_WINDOW_DAYS = 3;

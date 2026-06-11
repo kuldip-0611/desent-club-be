@@ -51,7 +51,7 @@ export function buildOrderDeliveredEmail(data: OrderDeliveredData): string {
         <td style="padding:20px 24px">
           <p style="margin:0 0 6px;font-size:14px;font-weight:700;color:#1e293b">Something not right?</p>
           <p style="margin:0 0 12px;font-size:14px;color:#64748b;line-height:1.6">
-            You can request a return or size exchange within <strong>7 days of delivery</strong>
+            You can request a return or size exchange within <strong>3 days of delivery</strong>
             directly from the app. We'll schedule a free doorstep pickup.
           </p>
           <a href="${siteUrl}/orders/${data.orderId}" style="font-size:14px;font-weight:600;color:#4f46e5;text-decoration:none">
