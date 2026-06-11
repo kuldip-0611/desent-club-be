@@ -1,12 +1,16 @@
+import { createHmac } from 'crypto';
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
   Header,
+  HttpCode,
   Param,
   Patch,
   Post,
   Query,
+  RawBodyRequest,
   Request,
   Res,
   UseGuards,
@@ -14,6 +18,7 @@ import {
 import type { Response } from 'express';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { OrderStatus } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -24,6 +29,7 @@ import { CreateReturnDto } from './dto/create-return.dto';
 import { CreateReviewsDto } from './dto/create-reviews.dto';
 import { UpdateReturnStatusDto } from './dto/update-return-status.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
+import type { RazorpayWebhookEvent } from './dto/razorpay-webhook.dto';
 import { OrderService } from './order.service';
 
 @ApiTags('Orders')
@@ -31,7 +37,58 @@ import { OrderService } from './order.service';
 @UseGuards(JwtAuthGuard)
 @Controller()
 export class OrderController {
-  constructor(private readonly orderService: OrderService) {}
+  constructor(
+    private readonly orderService: OrderService,
+    private readonly config: ConfigService,
+  ) {}
+
+  // ── Public webhooks (no JWT guard) ─────────────────────────────────────────
+
+  /**
+   * POST /webhooks/razorpay
+   * Razorpay calls this when payments are captured/failed and refunds processed.
+   * Validates x-razorpay-signature HMAC before processing.
+   */
+  @Post('webhooks/razorpay')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Razorpay webhook receiver (public — HMAC verified)' })
+  async razorpayWebhook(
+    @Request() req: RawBodyRequest<{ headers: Record<string, string> }>,
+    @Body() body: RazorpayWebhookEvent,
+  ) {
+    const secret = this.config.get<string>('RAZORPAY_WEBHOOK_SECRET');
+    if (!secret) {
+      console.warn('[Razorpay Webhook] RAZORPAY_WEBHOOK_SECRET not set — skipping signature check');
+    } else {
+      const signature = req.headers['x-razorpay-signature'];
+      if (!signature) throw new BadRequestException('Missing webhook signature');
+
+      const rawBody = req.rawBody;
+      if (!rawBody) throw new BadRequestException('Raw body unavailable');
+
+      const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+      if (expected !== signature) throw new BadRequestException('Invalid webhook signature');
+    }
+
+    await this.orderService.handleRazorpayWebhook(body.event, body.payload).catch((err: Error) =>
+      console.error('[Razorpay Webhook] handler error:', err?.message),
+    );
+    return { received: true };
+  }
+
+  /**
+   * POST /webhooks/shiprocket
+   * Shiprocket calls this when shipment status changes (SHIPPED, DELIVERED, NDR, RTO, etc.)
+   */
+  @Post('webhooks/shiprocket')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Shiprocket webhook receiver (public)' })
+  async shiprocketWebhook(@Body() body: Record<string, unknown>) {
+    await this.orderService.handleShiprocketWebhook(body).catch((err: Error) =>
+      console.error('[Shiprocket Webhook] handler error:', err?.message),
+    );
+    return { received: true };
+  }
 
   @Post('orders')
   @ApiOperation({ summary: 'Create order and initiate Razorpay payment' })
@@ -180,5 +237,16 @@ export class OrderController {
   @ApiOperation({ summary: '[Admin] Update return request status' })
   updateReturn(@Param('id') id: string, @Body() dto: UpdateReturnStatusDto) {
     return this.orderService.updateReturnStatus(id, dto);
+  }
+
+  @Patch('admin/orders/:id/cod-remittance')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @ApiOperation({ summary: '[Admin] Mark COD order as remitted (cash received from courier)' })
+  markCodRemitted(
+    @Param('id') id: string,
+    @Body('remittanceRef') remittanceRef?: string,
+  ) {
+    return this.orderService.markCodRemitted(id, remittanceRef);
   }
 }

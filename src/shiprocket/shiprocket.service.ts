@@ -201,6 +201,103 @@ export class ShiprocketService implements OnModuleInit {
     return data;
   }
 
+  // ─── Cancel Order ──────────────────────────────────────────────────────────────
+
+  async cancelOrder(shiprocketOrderId: string): Promise<void> {
+    const headers = await this.authHeader();
+    await this.http.post(
+      '/orders/cancel',
+      { ids: [Number(shiprocketOrderId)] },
+      { headers },
+    );
+    this.logger.log(`Shiprocket order ${shiprocketOrderId} cancelled`);
+  }
+
+  // ─── Return / Reverse Pickup ──────────────────────────────────────────────────
+
+  /**
+   * Creates a reverse-pickup (return) order in Shiprocket.
+   * The courier will pick up the item from the customer and deliver to the warehouse.
+   */
+  async createReturnPickup(payload: {
+    /** Unique ID for this return — e.g. "RET-<orderId>" */
+    returnOrderId: string;
+    orderDate: string;
+    /** Customer (pickup) details */
+    customerName: string;
+    customerPhone: string;
+    customerAddress: string;
+    customerCity: string;
+    customerState: string;
+    customerPincode: string;
+    customerCountry: string;
+    /** Items being returned */
+    items: ShiprocketOrderItem[];
+    subTotal: number;
+  }): Promise<{ shiprocketOrderId: string; shipmentId: string }> {
+    const headers = await this.authHeader();
+
+    // Warehouse = ship-to for a return
+    const warehouseName = this.config.get<string>('SHIPROCKET_WAREHOUSE_NAME') ?? 'Desent Club';
+    const warehousePhone = this.config.get<string>('SHIPROCKET_WAREHOUSE_PHONE') ?? '9999999999';
+    const warehouseAddress = this.config.get<string>('SHIPROCKET_WAREHOUSE_ADDRESS') ?? '';
+    const warehouseCity = this.config.get<string>('SHIPROCKET_WAREHOUSE_CITY') ?? '';
+    const warehouseState = this.config.get<string>('SHIPROCKET_WAREHOUSE_STATE') ?? '';
+    const warehousePincode = this.config.get<string>('SHIPROCKET_WAREHOUSE_PINCODE') ?? '';
+    const pickupLocation = this.config.get<string>('SHIPROCKET_PICKUP_LOCATION') ?? 'Primary';
+
+    const body = {
+      order_id: payload.returnOrderId,
+      order_date: payload.orderDate,
+      channel_id: '',
+      pickup_customer_name: payload.customerName,
+      pickup_last_name: '',
+      pickup_address: payload.customerAddress,
+      pickup_city: payload.customerCity,
+      pickup_state: payload.customerState,
+      pickup_country: payload.customerCountry,
+      pickup_pincode: payload.customerPincode,
+      pickup_email: '',
+      pickup_phone: payload.customerPhone,
+      shipping_customer_name: warehouseName,
+      shipping_last_name: '',
+      shipping_address: warehouseAddress,
+      shipping_city: warehouseCity,
+      shipping_state: warehouseState,
+      shipping_country: 'India',
+      shipping_pincode: warehousePincode,
+      shipping_email: '',
+      shipping_phone: warehousePhone,
+      pickup_location: pickupLocation,
+      order_items: payload.items.map((i) => ({
+        name: i.name,
+        sku: i.sku,
+        units: i.units,
+        selling_price: i.selling_price,
+        discount: i.discount ?? '0',
+        tax: i.tax ?? '0',
+        hsn: i.hsn ?? '',
+      })),
+      payment_method: 'Prepaid',
+      sub_total: payload.subTotal,
+      length: 25,
+      breadth: 20,
+      height: 5,
+      weight: 0.5,
+    };
+
+    const { data } = await this.http.post<{ order_id: number; shipment_id: number }>(
+      '/orders/create/return',
+      body,
+      { headers },
+    );
+
+    return {
+      shiprocketOrderId: String(data.order_id),
+      shipmentId: String(data.shipment_id),
+    };
+  }
+
   // ─── Generate Manifest & Label (optional helpers) ─────────────────────────────
 
   async generateManifest(shiprocketOrderId: string): Promise<void> {

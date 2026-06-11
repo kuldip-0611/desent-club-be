@@ -13,7 +13,10 @@ async function bootstrap() {
   ensureCategoryUploadDir();
   ensureProfileUploadDir();
 
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    // Keep raw body buffer for Razorpay + Shiprocket webhook HMAC verification
+    rawBody: true,
+  });
   app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads/' });
   app.enableCors();
   app.useGlobalPipes(

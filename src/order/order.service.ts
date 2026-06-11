@@ -434,6 +434,124 @@ export class OrderService {
     };
   }
 
+  // ── Razorpay Webhook ──────────────────────────────────────────────────────────
+
+  /**
+   * Handles verified Razorpay webhook events.
+   * Called only after HMAC signature has been validated in the controller.
+   */
+  async handleRazorpayWebhook(event: string, payload: {
+    payment?: { entity: { id: string; order_id: string; status: string; amount: number; error_description?: string } };
+    refund?: { entity: { id: string; payment_id: string; amount: number } };
+  }): Promise<void> {
+    if (event === 'payment.captured') {
+      const entity = payload.payment?.entity;
+      if (!entity) return;
+
+      const payment = await this.prisma.payment.findUnique({
+        where: { razorpayOrderId: entity.order_id },
+        include: {
+          order: {
+            include: {
+              items: { include: { product: { select: { id: true, name: true, quantity: true } } } },
+              user: { select: { id: true, name: true, email: true, fcmToken: true } },
+            },
+          },
+        },
+      });
+      if (!payment || payment.status === PaymentStatus.PAID) return;
+
+      // Same atomic operation as verifyPayment — idempotent path
+      await this.prisma.$transaction(async (tx) => {
+        await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            razorpayPaymentId: entity.id,
+            status: PaymentStatus.PAID,
+          },
+        });
+        await tx.order.update({
+          where: { id: payment.orderId },
+          data: { status: OrderStatus.CONFIRMED },
+        });
+        for (const item of payment.order.items) {
+          if (item.variantId) {
+            await tx.productVariant.update({
+              where: { id: item.variantId },
+              data: { quantity: { decrement: item.quantity } },
+            });
+          }
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { quantity: { decrement: item.quantity } },
+          });
+        }
+        if (payment.order.couponId) {
+          await this.couponService.redeem(tx, payment.order.couponId, payment.order.userId);
+        }
+      });
+
+      // Notify user
+      const order = payment.order;
+      this.notification.notifyOrderConfirmed({
+        userEmail: order.user.email,
+        userName: order.user.name,
+        fcmToken: order.user.fcmToken,
+        orderId: payment.orderId,
+        items: order.items.map((i) => ({
+          name: i.product.name,
+          size: i.size,
+          color: i.color,
+          quantity: i.quantity,
+          unitPrice: Number(i.unitPrice),
+          total: Number(i.total),
+        })),
+        subtotal: Number(order.subtotal),
+        discountAmount: Number(order.discountAmount),
+        total: Number(order.total),
+        shippingAddress: order.shippingAddress as Record<string, unknown> | null,
+      });
+      this.notification.sendAdminOrderAlert('new_order', payment.orderId, order.user.name, Number(order.total)).catch(() => undefined);
+      this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name }))).catch(() => undefined);
+
+      console.log(`[Razorpay Webhook] payment.captured — orderId=${payment.orderId} paymentId=${entity.id}`);
+    }
+
+    if (event === 'payment.failed') {
+      const entity = payload.payment?.entity;
+      if (!entity) return;
+
+      await this.prisma.payment.updateMany({
+        where: { razorpayOrderId: entity.order_id, status: PaymentStatus.PENDING },
+        data: {
+          status: PaymentStatus.FAILED,
+          failureReason: entity.error_description ?? 'Payment failed',
+        },
+      });
+      console.log(`[Razorpay Webhook] payment.failed — rzpOrderId=${entity.order_id}`);
+    }
+
+    if (event === 'refund.processed') {
+      const entity = payload.refund?.entity;
+      if (!entity) return;
+
+      const payment = await this.prisma.payment.findFirst({
+        where: { razorpayPaymentId: entity.payment_id },
+      });
+      if (!payment) return;
+
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: PaymentStatus.REFUNDED,
+          razorpayRefundId: entity.id,
+          refundedAt: new Date(),
+        },
+      });
+      console.log(`[Razorpay Webhook] refund.processed — paymentId=${entity.payment_id} refundId=${entity.id}`);
+    }
+  }
+
   async getOrderById(orderId: string, userId?: string) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, ...(userId ? { userId } : {}) },
@@ -461,7 +579,11 @@ export class OrderService {
   async cancelOrder(userId: string, orderId: string, dto: CancelOrderDto) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, userId },
-      include: { payment: true, returnRequests: { where: { status: { not: ReturnStatus.REJECTED } } } },
+      include: {
+        payment: true,
+        returnRequests: { where: { status: { not: ReturnStatus.REJECTED } } },
+        items: true,  // needed for stock restore
+      },
     });
     if (!order) throw new NotFoundException('Order not found');
 
@@ -478,19 +600,42 @@ export class OrderService {
     const now = new Date();
     const cancelReason = dto.reason?.trim() || 'Cancelled by customer';
 
-    // ── Step 1: mark order CANCELLED ──────────────────────────────────────────
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: { status: OrderStatus.CANCELLED, cancelledAt: now, cancelReason },
+    // ── Step 1: mark CANCELLED + restore stock (atomic) ───────────────────────
+    await this.prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: orderId },
+        data: { status: OrderStatus.CANCELLED, cancelledAt: now, cancelReason },
+      });
+
+      // Only restore stock if order was CONFIRMED/PROCESSING (inventory was decremented)
+      const stockDeducted = ([
+        OrderStatus.CONFIRMED as string,
+        OrderStatus.PROCESSING as string,
+        OrderStatus.SHIPPED as string,
+      ]).includes(order.status);
+
+      if (stockDeducted) {
+        await this.restoreStock(
+          order.items.map((i) => ({ productId: i.productId, variantId: i.variantId, quantity: i.quantity })),
+          tx,
+        );
+      }
     });
 
-    // ── Step 2: handle payment refund ─────────────────────────────────────────
+    // ── Step 2: cancel in Shiprocket (if already pushed) ─────────────────────
+    const shiprocketOrderId = (order as unknown as { shiprocketOrderId?: string }).shiprocketOrderId;
+    if (shiprocketOrderId) {
+      this.shiprocket.cancelOrder(shiprocketOrderId).catch((err: Error) =>
+        console.error(`[Shiprocket] Cancel order failed for ${orderId}:`, err?.message),
+      );
+    }
+
+    // ── Step 3: handle payment refund ─────────────────────────────────────────
     const payment = order.payment;
     let refundMode: 'razorpay' | 'local' | 'none' = 'none';
     let razorpayRefundId: string | undefined;
 
     if (payment?.status === PaymentStatus.PAID) {
-      // Attempt actual Razorpay refund
       const refundResult = await this.initiateCancelRefund(payment);
       refundMode = refundResult.mode;
       razorpayRefundId = refundResult.razorpayRefundId;
@@ -504,7 +649,6 @@ export class OrderService {
         },
       });
     } else if (payment && payment.status === PaymentStatus.PENDING) {
-      // Payment was created in Razorpay but never captured — just mark failed
       await this.prisma.payment.update({
         where: { id: payment.id },
         data: { status: PaymentStatus.FAILED, failureReason: 'Order cancelled before payment' },
@@ -512,7 +656,7 @@ export class OrderService {
       refundMode = 'none';
     }
 
-    // ── Step 3: push notification ─────────────────────────────────────────────
+    // ── Step 4: push notification ─────────────────────────────────────────────
     const cancelUser = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { fcmToken: true },
@@ -774,21 +918,37 @@ export class OrderService {
   async updateReturnStatus(returnId: string, dto: UpdateReturnStatusDto) {
     const returnRequest = await this.prisma.returnRequest.findUnique({
       where: { id: returnId },
-      include: { order: { include: { payment: true } } },
+      include: {
+        order: {
+          include: {
+            payment: true,
+            items: {
+              include: { product: { select: { id: true, name: true } } },
+            },
+            user: { select: { id: true, name: true, phone: true, fcmToken: true } },
+          },
+        },
+      },
     });
     if (!returnRequest) throw new NotFoundException('Return request not found');
 
+    const isExchange = returnRequest.type === 'EXCHANGE';
+
+    // ── Allowed transitions (differ by type) ──────────────────────────────────
     const allowed: Record<ReturnStatus, ReturnStatus[]> = {
       REQUESTED: [ReturnStatus.APPROVED, ReturnStatus.REJECTED],
       APPROVED: [ReturnStatus.RECEIVED, ReturnStatus.REJECTED],
-      RECEIVED: [ReturnStatus.REFUNDED],
+      // EXCHANGE: RECEIVED → EXCHANGED (dispatch new size), skip REFUNDED
+      // RETURN:   RECEIVED → REFUNDED
+      RECEIVED: isExchange ? [ReturnStatus.EXCHANGED] : [ReturnStatus.REFUNDED],
       REJECTED: [],
       REFUNDED: [],
+      EXCHANGED: [],
     };
 
     if (!allowed[returnRequest.status]?.includes(dto.status)) {
       throw new BadRequestException(
-        `Cannot change return from ${returnRequest.status} to ${dto.status}`,
+        `Cannot change ${isExchange ? 'exchange' : 'return'} from ${returnRequest.status} to ${dto.status}`,
       );
     }
 
@@ -809,6 +969,111 @@ export class OrderService {
       amount?: number;
     } | null = null;
 
+    // ── APPROVED: create Shiprocket reverse pickup ─────────────────────────────
+    if (dto.status === ReturnStatus.APPROVED) {
+      const order = returnRequest.order;
+      const addr = (order.shippingAddress ?? {}) as Record<string, string>;
+      const customerName = addr['fullName'] ?? order.user.name;
+      const customerPhone = addr['phone'] ?? order.user.phone ?? '0000000000';
+
+      // Pick the items being returned/exchanged
+      const returnItems = isExchange && returnRequest.orderItemId
+        ? order.items.filter((i) => i.id === returnRequest.orderItemId)
+        : order.items;
+
+      this.shiprocket
+        .createReturnPickup({
+          returnOrderId: `RET-${returnRequest.id.slice(0, 12)}`,
+          orderDate: new Date().toISOString().split('T')[0],
+          customerName,
+          customerPhone,
+          customerAddress: addr['line1'] ?? '',
+          customerCity: addr['city'] ?? '',
+          customerState: addr['state'] ?? '',
+          customerPincode: addr['pincode'] ?? '',
+          customerCountry: addr['country'] ?? 'India',
+          items: returnItems.map((item) => ({
+            name: item.product.name,
+            sku: item.variantId ?? item.product.id,
+            units: item.quantity,
+            selling_price: String(Number(item.unitPrice)),
+          })),
+          subTotal: returnItems.reduce((s, i) => s + Number(i.total), 0),
+        })
+        .then(async ({ shiprocketOrderId, shipmentId }) => {
+          // Try assigning AWB immediately
+          let awbCode = '';
+          let courierName = '';
+          try {
+            const awb = await this.shiprocket.assignAWB(shipmentId);
+            awbCode = awb.awbCode;
+            courierName = awb.courierName;
+          } catch {
+            // AWB assignment can fail if couriers aren't set up — store shipment id only
+            awbCode = '';
+          }
+
+          await this.prisma.returnRequest.update({
+            where: { id: returnId },
+            data: {
+              returnShiprocketOrderId: shiprocketOrderId,
+              returnShipmentId: shipmentId,
+              returnAwbCode: awbCode || null,
+              returnCourierName: courierName || null,
+            },
+          });
+
+          const action = isExchange ? 'size exchange' : 'return';
+          console.log(
+            `[Shiprocket] Reverse pickup created for ${action} ${returnId} — srOrderId=${shiprocketOrderId} AWB=${awbCode || 'pending'}`,
+          );
+        })
+        .catch((err: Error) =>
+          console.error(`[Shiprocket] Reverse pickup failed for ${returnId}:`, err?.message),
+        );
+
+      // Notify user
+      this.notification
+        .persistAndPush(
+          returnRequest.userId,
+          isExchange ? 'Exchange approved 🔄' : 'Return approved ✅',
+          isExchange
+            ? `Your size exchange request to ${returnRequest.exchangeSize} has been approved. A courier will pick up your item shortly.`
+            : 'Your return has been approved. A courier will pick up your item shortly.',
+          'order',
+          order.user.fcmToken ?? undefined,
+          { returnId, orderId: returnRequest.orderId },
+        )
+        .catch(() => undefined);
+    }
+
+    // ── RECEIVED: restore stock for returned items ────────────────────────────
+    if (dto.status === ReturnStatus.RECEIVED) {
+      // Determine which items were returned
+      const returnedItems = isExchange && returnRequest.orderItemId
+        ? returnRequest.order.items.filter((i) => i.id === returnRequest.orderItemId)
+        : returnRequest.order.items;
+
+      // Restore stock atomically within the existing transaction
+      for (const item of returnedItems) {
+        if (item.variantId) {
+          updates.push(
+            this.prisma.productVariant.update({
+              where: { id: item.variantId },
+              data: { quantity: { increment: item.quantity } },
+            }),
+          );
+        }
+        updates.push(
+          this.prisma.product.update({
+            where: { id: item.productId },
+            data: { quantity: { increment: item.quantity } },
+          }),
+        );
+      }
+    }
+
+    // ── REFUNDED (RETURN only): process Razorpay refund ───────────────────────
     if (dto.status === ReturnStatus.REFUNDED) {
       const payment = returnRequest.order.payment;
       if (payment) {
@@ -833,18 +1098,177 @@ export class OrderService {
           data: { status: OrderStatus.REFUNDED },
         }),
       );
+
+      // Notify user
+      this.notification
+        .persistAndPush(
+          returnRequest.userId,
+          'Refund processed 💰',
+          `Your refund for order #${returnRequest.orderId.slice(-8).toUpperCase()} has been processed.`,
+          'order',
+          returnRequest.order.user.fcmToken ?? undefined,
+          { returnId, orderId: returnRequest.orderId },
+        )
+        .catch(() => undefined);
+    }
+
+    // ── EXCHANGED: validate stock, deduct new size, dispatch via Shiprocket ─────
+    if (dto.status === ReturnStatus.EXCHANGED) {
+      const order = returnRequest.order;
+      const addr = (order.shippingAddress ?? {}) as Record<string, string>;
+      const customerName = addr['fullName'] ?? order.user.name;
+      const customerPhone = addr['phone'] ?? order.user.phone ?? '0000000000';
+
+      const exchangeItem = order.items.find((i) => i.id === returnRequest.orderItemId);
+
+      if (exchangeItem && returnRequest.exchangeSize) {
+        // ── Check stock of the new size ───────────────────────────────────────
+        const newVariant = await this.prisma.productVariant.findFirst({
+          where: {
+            productId: exchangeItem.productId,
+            size: { equals: returnRequest.exchangeSize },
+          },
+        });
+        if (!newVariant) {
+          throw new BadRequestException(
+            `No variant found for size "${returnRequest.exchangeSize}" — cannot dispatch exchange`,
+          );
+        }
+        if (newVariant.quantity < exchangeItem.quantity) {
+          throw new BadRequestException(
+            `Insufficient stock for size "${returnRequest.exchangeSize}" (need ${exchangeItem.quantity}, have ${newVariant.quantity})`,
+          );
+        }
+
+        // ── Deduct new size stock + update order item size ────────────────────
+        updates.push(
+          this.prisma.productVariant.update({
+            where: { id: newVariant.id },
+            data: { quantity: { decrement: exchangeItem.quantity } },
+          }),
+          this.prisma.product.update({
+            where: { id: exchangeItem.productId },
+            data: { quantity: { decrement: exchangeItem.quantity } },
+          }),
+          this.prisma.orderItem.update({
+            where: { id: exchangeItem.id },
+            data: { size: returnRequest.exchangeSize, variantId: newVariant.id },
+          }),
+        );
+      }
+
+      // Dispatch new size via Shiprocket (forward)
+      this.shiprocket
+        .createOrder({
+          orderId: `EXC-${returnRequest.id.slice(0, 12)}`,
+          orderDate: new Date().toISOString().split('T')[0],
+          billingCustomerName: customerName,
+          billingPhone: customerPhone,
+          billingAddress: addr['line1'] ?? '',
+          billingCity: addr['city'] ?? '',
+          billingState: addr['state'] ?? '',
+          billingPincode: addr['pincode'] ?? '',
+          billingCountry: addr['country'] ?? 'India',
+          shippingCustomerName: customerName,
+          shippingPhone: customerPhone,
+          shippingAddress: addr['line1'] ?? '',
+          shippingCity: addr['city'] ?? '',
+          shippingState: addr['state'] ?? '',
+          shippingPincode: addr['pincode'] ?? '',
+          shippingCountry: addr['country'] ?? 'India',
+          paymentMethod: 'Prepaid',
+          subTotal: exchangeItem ? Number(exchangeItem.total) : 0,
+          length: 25,
+          breadth: 20,
+          height: 5,
+          weight: 0.5,
+          items: exchangeItem
+            ? [
+                {
+                  name: `${exchangeItem.product.name} (Exchange → ${returnRequest.exchangeSize})`,
+                  sku: exchangeItem.variantId ?? exchangeItem.product.id,
+                  units: exchangeItem.quantity,
+                  selling_price: String(Number(exchangeItem.unitPrice)),
+                },
+              ]
+            : order.items.map((item) => ({
+                name: item.product.name,
+                sku: item.variantId ?? item.product.id,
+                units: item.quantity,
+                selling_price: String(Number(item.unitPrice)),
+              })),
+        })
+        .then(async ({ shiprocketOrderId, shiprocketShipmentId }) => {
+          let awbCode = '';
+          let courierName = '';
+          try {
+            const awb = await this.shiprocket.assignAWB(shiprocketShipmentId);
+            awbCode = awb.awbCode;
+            courierName = awb.courierName;
+          } catch {
+            awbCode = '';
+          }
+
+          await this.prisma.returnRequest.update({
+            where: { id: returnId },
+            data: {
+              exchangeShiprocketOrderId: shiprocketOrderId,
+              exchangeShipmentId: shiprocketShipmentId,
+              exchangeAwbCode: awbCode || null,
+              exchangeCourierName: courierName || null,
+            },
+          });
+
+          console.log(
+            `[Shiprocket] Exchange forward order created for ${returnId} — srOrderId=${shiprocketOrderId} AWB=${awbCode || 'pending'}`,
+          );
+        })
+        .catch((err: Error) =>
+          console.error(`[Shiprocket] Exchange dispatch failed for ${returnId}:`, err?.message),
+        );
+
+      // Update order status back to SHIPPED (new item on the way)
+      updates.push(
+        this.prisma.order.update({
+          where: { id: returnRequest.orderId },
+          data: { status: OrderStatus.SHIPPED },
+        }),
+      );
+
+      // Notify user
+      this.notification
+        .persistAndPush(
+          returnRequest.userId,
+          'Exchange dispatched 🚚',
+          `Your replacement item (size ${returnRequest.exchangeSize}) has been dispatched! Track it in your orders.`,
+          'order',
+          order.user.fcmToken ?? undefined,
+          { returnId, orderId: returnRequest.orderId },
+        )
+        .catch(() => undefined);
     }
 
     await this.prisma.$transaction(updates);
-    return {
-      message:
-        dto.status === ReturnStatus.REFUNDED && refundInfo?.mode === 'razorpay'
+
+    const messageMap: Partial<Record<ReturnStatus, string>> = {
+      [ReturnStatus.APPROVED]: isExchange
+        ? 'Exchange approved — reverse pickup created in Shiprocket'
+        : 'Return approved — reverse pickup created in Shiprocket',
+      [ReturnStatus.REJECTED]: `${isExchange ? 'Exchange' : 'Return'} request rejected`,
+      [ReturnStatus.RECEIVED]: 'Item received at warehouse',
+      [ReturnStatus.REFUNDED]:
+        refundInfo?.mode === 'razorpay'
           ? 'Return refunded via Razorpay'
-          : dto.status === ReturnStatus.REFUNDED && refundInfo?.mode === 'local'
-            ? 'Return marked refunded in app only — payment was not captured in Razorpay'
-            : dto.status === ReturnStatus.REFUNDED && refundInfo?.mode === 'cod'
-              ? 'Return marked refunded (COD — no online payout)'
-              : 'Return status updated',
+          : refundInfo?.mode === 'local'
+            ? 'Marked refunded (payment not captured in Razorpay)'
+            : refundInfo?.mode === 'cod'
+              ? 'Marked refunded (COD — no online payout)'
+              : 'Refund processed',
+      [ReturnStatus.EXCHANGED]: 'Exchange dispatched — new size shipped to customer via Shiprocket',
+    };
+
+    return {
+      message: messageMap[dto.status] ?? 'Status updated',
       returnId,
       refund: refundInfo,
     };
@@ -1183,6 +1607,24 @@ export class OrderService {
     );
   }
 
+  /** Admin manually marks a COD order as remitted */
+  async markCodRemitted(orderId: string, remittanceRef?: string): Promise<{ message: string }> {
+    const payment = await this.prisma.payment.findFirst({
+      where: { orderId, method: PaymentMethod.COD },
+    });
+    if (!payment) throw new NotFoundException('COD payment not found for this order');
+
+    await this.prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        status: PaymentStatus.PAID,
+        codRemittedAt: new Date(),
+        codRemittanceRef: remittanceRef?.trim() || null,
+      },
+    });
+    return { message: 'COD payment marked as remitted' };
+  }
+
   async getOrderTracking(orderId: string, userId: string) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, userId },
@@ -1204,13 +1646,144 @@ export class OrderService {
       }
     }
 
+    // Don't expose internal sentinel string to the user
+    const safeTrackingUrl =
+      order.trackingUrl?.startsWith('sr_shipment:') ? null : order.trackingUrl;
+
     return {
       status: order.status,
       awbCode: order.awbCode,
       courierName: order.courierName,
-      trackingUrl: order.trackingUrl,
+      trackingUrl: safeTrackingUrl,
       shiprocketTracking,
     };
+  }
+
+  // ── Shiprocket Webhook ────────────────────────────────────────────────────────
+
+  /**
+   * Handles incoming Shiprocket shipment status webhooks.
+   * Maps Shiprocket status codes to our OrderStatus and persists tracking info.
+   *
+   * Shiprocket delivers a flat payload with at minimum:
+   *   awb, current_status, courier_name, shipment_track_activities
+   */
+  async handleShiprocketWebhook(body: Record<string, unknown>): Promise<void> {
+    // Route COD remittance events separately
+    const event = String(body['event'] ?? '').toLowerCase();
+    if (event.includes('cod_remittance') || event.includes('remittance')) {
+      await this.handleShiprocketCodRemittance(body);
+      return;
+    }
+
+    const awb = String(body['awb'] ?? body['awb_code'] ?? '').trim();
+    const srStatus = String(body['current_status'] ?? body['status'] ?? '').toUpperCase();
+
+    if (!awb) {
+      console.warn('[Shiprocket Webhook] No AWB in payload — ignoring');
+      return;
+    }
+
+    // Shiprocket status → our OrderStatus map
+    const statusMap: Record<string, OrderStatus> = {
+      'SHIPPED': OrderStatus.SHIPPED,
+      'IN TRANSIT': OrderStatus.SHIPPED,
+      'OUT FOR DELIVERY': OrderStatus.SHIPPED,
+      'DELIVERED': OrderStatus.DELIVERED,
+      'RTO INITIATED': OrderStatus.SHIPPED,
+      'RTO DELIVERED': OrderStatus.CANCELLED,  // item returned to sender
+      'CANCELLED': OrderStatus.CANCELLED,
+      'NDR': OrderStatus.SHIPPED,              // Non-Delivery Report — still in transit
+    };
+
+    const newStatus = statusMap[srStatus];
+    if (!newStatus) {
+      console.log(`[Shiprocket Webhook] Unhandled status "${srStatus}" for AWB ${awb}`);
+      return;
+    }
+
+    const order = await this.prisma.order.findFirst({
+      where: { awbCode: awb },
+      select: { id: true, status: true, userId: true },
+    });
+    if (!order) {
+      console.warn(`[Shiprocket Webhook] No order found for AWB ${awb}`);
+      return;
+    }
+
+    // Only advance status (don't regress)
+    const statusRank: Record<string, number> = {
+      PENDING: 0, CONFIRMED: 1, PROCESSING: 2, SHIPPED: 3, DELIVERED: 4, CANCELLED: 5, REFUNDED: 6,
+    };
+    if ((statusRank[newStatus] ?? 0) <= (statusRank[order.status] ?? 0)) {
+      console.log(`[Shiprocket Webhook] Status "${srStatus}" ≤ current "${order.status}" — skipping`);
+      return;
+    }
+
+    const updateData: Prisma.OrderUpdateInput = { status: newStatus };
+    if (newStatus === OrderStatus.DELIVERED) updateData.deliveredAt = new Date();
+    if (newStatus === OrderStatus.CANCELLED) updateData.cancelledAt = new Date();
+
+    // Store latest courier name if provided
+    const courierName = String(body['courier_name'] ?? '').trim();
+    if (courierName) updateData.courierName = courierName;
+
+    await this.prisma.order.update({ where: { id: order.id }, data: updateData });
+
+    // Notify user of status change
+    const user = await this.prisma.user.findUnique({
+      where: { id: order.userId },
+      select: { fcmToken: true },
+    });
+    this.notification.notifyOrderStatusChanged(user?.fcmToken, order.id, newStatus);
+
+    console.log(`[Shiprocket Webhook] Order ${order.id} → ${newStatus} (AWB ${awb} / "${srStatus}")`);
+  }
+
+  /**
+   * Handles Shiprocket COD remittance webhook.
+   * Called when Shiprocket sends a cod_remittance event.
+   */
+  async handleShiprocketCodRemittance(body: Record<string, unknown>): Promise<void> {
+    const awb = String(body['awb'] ?? '').trim();
+    const remittanceRef = String(body['remittance_id'] ?? body['remittance_reference'] ?? '').trim();
+    if (!awb) return;
+
+    const order = await this.prisma.order.findFirst({
+      where: { awbCode: awb },
+      include: { payment: true },
+    });
+    if (!order?.payment || order.payment.method !== PaymentMethod.COD) return;
+
+    await this.prisma.payment.update({
+      where: { id: order.payment.id },
+      data: {
+        status: PaymentStatus.PAID,    // COD now collected & remitted
+        codRemittedAt: new Date(),
+        codRemittanceRef: remittanceRef || null,
+      },
+    });
+    console.log(`[Shiprocket Webhook] COD remitted for order ${order.id} AWB ${awb} ref=${remittanceRef}`);
+  }
+
+  // ── Stock restore helper (returns + cancellations) ───────────────────────────
+
+  private async restoreStock(
+    items: { productId: string; variantId: string | null; quantity: number }[],
+    tx: Prisma.TransactionClient,
+  ) {
+    for (const item of items) {
+      if (item.variantId) {
+        await tx.productVariant.update({
+          where: { id: item.variantId },
+          data: { quantity: { increment: item.quantity } },
+        });
+      }
+      await tx.product.update({
+        where: { id: item.productId },
+        data: { quantity: { increment: item.quantity } },
+      });
+    }
   }
 
   // ─── Invoice HTML Generator ───────────────────────────────────────────────

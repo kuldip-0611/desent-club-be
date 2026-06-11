@@ -435,6 +435,7 @@ enum ReturnStatus {
   REJECTED
   RECEIVED
   REFUNDED
+  EXCHANGED   // exchange item dispatched to customer (only for type=EXCHANGE)
 }
 
 model Order {
@@ -481,6 +482,19 @@ model ReturnRequest {
   exchangeSize String?      @db.VarChar(64)
   status       ReturnStatus @default(REQUESTED)
   adminNote    String?      @db.Text
+
+  // Shiprocket reverse pickup (created when admin approves)
+  returnShiprocketOrderId String? @db.VarChar(64)
+  returnShipmentId        String? @db.VarChar(64)
+  returnAwbCode           String? @db.VarChar(64)
+  returnCourierName       String? @db.VarChar(128)
+
+  // Shiprocket forward shipment for exchange (created when exchange item dispatched)
+  exchangeShiprocketOrderId String? @db.VarChar(64)
+  exchangeShipmentId        String? @db.VarChar(64)
+  exchangeAwbCode           String? @db.VarChar(64)
+  exchangeCourierName       String? @db.VarChar(128)
+
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
@@ -540,6 +554,10 @@ model Payment {
   status              PaymentStatus  @default(PENDING)
   failureReason       String?
   refundedAt          DateTime?
+  /** For COD orders: date the courier remitted cash to the business */
+  codRemittedAt       DateTime?
+  /** Shiprocket remittance reference (if available) */
+  codRemittanceRef    String?        @db.VarChar(128)
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
 
