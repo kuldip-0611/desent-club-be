@@ -1,11 +1,12 @@
 import { Body, Controller, Get, Param, Patch, Query, Req, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { SkipThrottle } from '@nestjs/throttler';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { LoyaltyService, LOYALTY_RULES } from './loyalty.service';
+import { AdjustPointsDto } from './dto/adjust-points.dto';
 
 @ApiTags('Loyalty')
 @Controller()
@@ -45,11 +46,42 @@ export class LoyaltyController {
   @Patch('admin/loyalty/:userId/adjust')
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
-  @ApiOperation({ summary: '[Admin] Manually adjust user loyalty points' })
+  @ApiOperation({
+    summary: '[Admin] Manually adjust user loyalty points',
+    description:
+      'Add (positive) or deduct (negative) points from a user\'s loyalty account. ' +
+      'Cannot deduct more than the user\'s current balance. Returns before/after snapshot.',
+  })
+  @ApiParam({ name: 'userId', description: 'The user\'s ID' })
+  @ApiBody({ type: AdjustPointsDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Points adjusted successfully',
+    schema: {
+      example: {
+        userId: 'clxyz123',
+        previousBalance: 250,
+        adjustedBy: 100,
+        newBalance: 350,
+        transactionId: 'clxyz456',
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Points is zero or deduction exceeds balance' })
+  @ApiResponse({ status: 404, description: 'User not found' })
   adjust(
     @Param('userId') userId: string,
-    @Body() body: { points: number; reason: string },
+    @Body() dto: AdjustPointsDto,
   ) {
-    return this.loyaltyService.adjustPoints(userId, body.points, body.reason);
+    return this.loyaltyService.adjustPoints(userId, dto.points, dto.reason, dto.adminNote);
+  }
+
+  @Get('admin/loyalty/:userId')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: '[Admin] Get loyalty account for a specific user' })
+  @ApiParam({ name: 'userId', description: 'The user\'s ID' })
+  getUserAccount(@Param('userId') userId: string) {
+    return this.loyaltyService.getAccount(userId);
   }
 }

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoyaltyTxType } from '@prisma/client';
 
@@ -106,20 +106,93 @@ export class LoyaltyService {
 
   // ── Admin: adjust points ──────────────────────────────────────────────────
 
-  async adjustPoints(userId: string, points: number, reason: string): Promise<void> {
-    await this.addPoints(userId, points, LoyaltyTxType.ADJUSTED, reason);
+  async adjustPoints(
+    userId: string,
+    points: number,
+    reason: string,
+    adminNote?: string,
+  ): Promise<{
+    userId: string;
+    previousBalance: number;
+    adjustedBy: number;
+    newBalance: number;
+    transactionId: string;
+  }> {
+    if (points === 0) {
+      throw new BadRequestException('Points adjustment cannot be zero');
+    }
+
+    // Verify user exists
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true } });
+    if (!user) throw new NotFoundException(`User ${userId} not found`);
+
+    // Get or create loyalty account to check current balance
+    const account = await this.prisma.loyaltyAccount.upsert({
+      where: { userId },
+      create: { userId, balance: 0, totalEarned: 0, totalRedeemed: 0 },
+      update: {},
+    });
+
+    const previousBalance = account.balance;
+
+    // Guard: cannot deduct more than current balance
+    if (points < 0 && Math.abs(points) > previousBalance) {
+      throw new BadRequestException(
+        `Cannot deduct ${Math.abs(points)} points. User only has ${previousBalance} points.`,
+      );
+    }
+
+    const newBalance = previousBalance + points;
+    const description = adminNote
+      ? `${reason} (Admin note: ${adminNote})`
+      : reason;
+
+    const [, tx] = await this.prisma.$transaction([
+      this.prisma.loyaltyAccount.update({
+        where: { userId },
+        data: {
+          balance: { increment: points },
+          // Track totals correctly
+          ...(points > 0
+            ? { totalEarned: { increment: points } }
+            : { totalRedeemed: { increment: Math.abs(points) } }),
+        },
+      }),
+      this.prisma.loyaltyTransaction.create({
+        data: {
+          account: { connect: { userId } },
+          type: LoyaltyTxType.ADJUSTED,
+          points,
+          description,
+        },
+      }),
+    ]);
+
+    this.logger.log(
+      `[Admin] Adjusted ${points > 0 ? '+' : ''}${points} pts for user ${userId} (${user.name}). ` +
+      `${previousBalance} → ${newBalance}. Reason: ${reason}`,
+    );
+
+    return {
+      userId,
+      previousBalance,
+      adjustedBy: points,
+      newBalance,
+      transactionId: tx.id,
+    };
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
   private async addPoints(userId: string, points: number, type: LoyaltyTxType, description: string): Promise<void> {
+    if (points === 0) return;
     await this.prisma.$transaction([
       this.prisma.loyaltyAccount.upsert({
         where: { userId },
         create: { userId, balance: Math.max(0, points), totalEarned: Math.max(0, points), totalRedeemed: 0 },
         update: {
           balance: { increment: points },
-          ...(points > 0 ? { totalEarned: { increment: points } } : {}),
+          ...(points > 0 ? { totalEarned: { increment: points } } : { totalRedeemed: { increment: Math.abs(points) } }),
         },
       }),
       this.prisma.loyaltyTransaction.create({
