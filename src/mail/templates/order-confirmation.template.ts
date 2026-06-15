@@ -1,3 +1,4 @@
+import { resolveSiteUrl } from '../../common/site.constants'
 import { baseLayout, orderBadge, ctaButton, infoTable, divider, sectionHeading, alertBox } from './base.template'
 
 export interface OrderConfirmationData {
@@ -30,7 +31,7 @@ export interface OrderConfirmationData {
 
 export function buildOrderConfirmationEmail(data: OrderConfirmationData): string {
   const ref = data.orderId.slice(-8).toUpperCase()
-  const siteUrl = data.siteUrl ?? 'https://desentclub.com'
+  const siteUrl = resolveSiteUrl(data.siteUrl)
   const isCod = data.paymentMethod === 'COD'
 
   // Items table

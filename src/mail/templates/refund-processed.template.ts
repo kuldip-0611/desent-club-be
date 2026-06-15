@@ -1,3 +1,4 @@
+import { resolveSiteUrl } from '../../common/site.constants'
 import { baseLayout, orderBadge, ctaButton, infoTable, divider, alertBox } from './base.template'
 
 export interface RefundProcessedData {
@@ -11,7 +12,7 @@ export interface RefundProcessedData {
 
 export function buildRefundProcessedEmail(data: RefundProcessedData): string {
   const ref = data.orderId.slice(-8).toUpperCase()
-  const siteUrl = data.siteUrl ?? 'https://desentclub.com'
+  const siteUrl = resolveSiteUrl(data.siteUrl)
   const isCod = data.paymentMethod === 'COD'
 
   const refundNote = isCod

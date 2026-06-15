@@ -1,7 +1,8 @@
 import { baseLayout } from '../../mail/templates/base.template'
+import { resolveSiteUrl } from '../../common/site.constants'
 
-const LOGO_URL = 'https://desentclub.com/logo.png'
-const SITE_URL = 'https://desentclub.com'
+const siteUrl = resolveSiteUrl()
+const LOGO_URL = `${siteUrl}/logo.png`
 
 export function buildRegistrationOtpEmail(otp: string): {
   subject: string

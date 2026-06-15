@@ -1,3 +1,4 @@
+import { resolveSiteUrl } from '../../common/site.constants'
 import { baseLayout, orderBadge, ctaButton, divider, alertBox } from './base.template'
 
 export interface OrderDeliveredData {
@@ -8,7 +9,7 @@ export interface OrderDeliveredData {
 
 export function buildOrderDeliveredEmail(data: OrderDeliveredData): string {
   const ref = data.orderId.slice(-8).toUpperCase()
-  const siteUrl = data.siteUrl ?? 'https://desentclub.com'
+  const siteUrl = resolveSiteUrl(data.siteUrl)
 
   const content = `
     <!-- Heading -->

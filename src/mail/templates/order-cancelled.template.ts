@@ -1,3 +1,4 @@
+import { resolveSiteUrl } from '../../common/site.constants'
 import { baseLayout, orderBadge, ctaButton, infoTable, divider, alertBox } from './base.template'
 
 export interface OrderCancelledData {
@@ -11,7 +12,7 @@ export interface OrderCancelledData {
 
 export function buildOrderCancelledEmail(data: OrderCancelledData): string {
   const ref = data.orderId.slice(-8).toUpperCase()
-  const siteUrl = data.siteUrl ?? 'https://desentclub.com'
+  const siteUrl = resolveSiteUrl(data.siteUrl)
   const willRefund = data.paymentMethod === 'ONLINE'
 
   const content = `

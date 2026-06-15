@@ -1,6 +1,7 @@
 import { baseLayout, ctaButton } from '../../mail/templates/base.template'
+import { resolveSiteUrl } from '../../common/site.constants'
 
-const LOGO_URL = 'https://desentclub.com/logo.png'
+const LOGO_URL = `${resolveSiteUrl()}/logo.png`
 
 export function buildPasswordResetEmail(resetLink: string): {
   subject: string

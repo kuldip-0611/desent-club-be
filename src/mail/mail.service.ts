@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
+import { resolveSiteUrl } from '../common/site.constants';
 import { buildOrderConfirmationEmail } from './templates/order-confirmation.template';
 import { buildOrderShippedEmail } from './templates/order-shipped.template';
 import { buildOrderDeliveredEmail } from './templates/order-delivered.template';
@@ -22,7 +23,7 @@ export class MailService {
   }
 
   private get siteUrl(): string {
-    return (this.config.get<string>('NEXT_PUBLIC_SITE_URL') ?? 'https://disentclub.com').replace(/\/$/, '');
+    return resolveSiteUrl(this.config.get<string>('NEXT_PUBLIC_SITE_URL'));
   }
 
   private getResend(): Resend | null {

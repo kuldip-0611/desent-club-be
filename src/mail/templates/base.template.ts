@@ -1,12 +1,21 @@
 /** Shared base layout for all Desent Club transactional emails */
+import { resolveSiteUrl } from '../../common/site.constants'
+
 export function baseLayout(opts: {
   preheader?: string
   content: string
   year?: number
-  /** Absolute URL of the brand logo image (e.g. https://desentclub.com/logo.png) */
+  /** Absolute URL of the brand logo image (e.g. https://disentclub.com/logo.png) */
   logoUrl?: string
+  siteUrl?: string
 }): string {
-  const { preheader = '', content, year = new Date().getFullYear(), logoUrl } = opts
+  const {
+    preheader = '',
+    content,
+    year = new Date().getFullYear(),
+    logoUrl,
+    siteUrl = resolveSiteUrl(),
+  } = opts
 
   return `<!DOCTYPE html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
@@ -104,9 +113,9 @@ export function baseLayout(opts: {
                     <!-- Social / links -->
                     <p style="margin:0;font-size:11px;color:#cbd5e1">
                       &copy; ${year} Desent Club &nbsp;·&nbsp;
-                      <a href="https://desentclub.com" style="color:#94a3b8;text-decoration:none">Visit Store</a>
+                      <a href="${siteUrl}" style="color:#94a3b8;text-decoration:none">Visit Store</a>
                       &nbsp;·&nbsp;
-                      <a href="https://desentclub.com/support" style="color:#94a3b8;text-decoration:none">Support</a>
+                      <a href="${siteUrl}/support" style="color:#94a3b8;text-decoration:none">Support</a>
                     </p>
                   </td>
                 </tr>

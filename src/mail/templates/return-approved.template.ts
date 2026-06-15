@@ -1,3 +1,4 @@
+import { resolveSiteUrl } from '../../common/site.constants'
 import { baseLayout, orderBadge, ctaButton, infoTable, divider, alertBox } from './base.template'
 
 export interface ReturnApprovedData {
@@ -12,7 +13,7 @@ export interface ReturnApprovedData {
 
 export function buildReturnApprovedEmail(data: ReturnApprovedData): string {
   const ref = data.orderId.slice(-8).toUpperCase()
-  const siteUrl = data.siteUrl ?? 'https://desentclub.com'
+  const siteUrl = resolveSiteUrl(data.siteUrl)
   const isExchange = data.returnType === 'EXCHANGE'
 
   const content = `

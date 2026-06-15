@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import { MailService } from '../mail/mail.service';
+import { resolveSiteUrl } from '../common/site.constants';
 import {
   buildDirectCouponEmail,
   buildGroupCouponEmail,
@@ -29,6 +30,10 @@ export class NotificationService {
     private readonly firebase: FirebaseService,
     private readonly mailService: MailService,
   ) {}
+
+  private get siteUrl(): string {
+    return resolveSiteUrl(this.configService.get<string>('NEXT_PUBLIC_SITE_URL'));
+  }
 
   /**
    * Called after a public coupon is created.
@@ -235,14 +240,14 @@ export class NotificationService {
       <p>You left some items in your cart at <strong>Desent Club</strong>:</p>
       <ul>${itemRows}</ul>
       <p>Complete your purchase before items sell out!</p>
-      <a href="${this.configService.get('NEXT_PUBLIC_SITE_URL') ?? 'https://desenclub.com'}/cart" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-top:16px;">Complete Purchase →</a>
+      <a href="${this.siteUrl}/cart" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-top:16px;">Complete Purchase →</a>
     `;
-    const text = `Hi ${userName}, you left ${items.length} item(s) in your Desent Club cart. Visit desenclub.com/cart to complete your purchase.`;
+    const text = `Hi ${userName}, you left ${items.length} item(s) in your Desent Club cart. Visit ${this.siteUrl}/cart to complete your purchase.`;
     this.send(to, subject, text, html).catch(() => undefined);
   }
 
   async sendBackInStockEmail(to: string, productName: string, productId: string): Promise<void> {
-    const siteUrl = this.configService.get('NEXT_PUBLIC_SITE_URL') ?? 'https://desenclub.com';
+    const siteUrl = this.siteUrl;
     const subject = `${productName} is back in stock — Desent Club`;
     const html = `
       <p>Great news! <strong>${productName}</strong> is back in stock at Desent Club.</p>
@@ -292,7 +297,7 @@ export class NotificationService {
             <div style="background:#fff;padding:28px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
               <h2 style="color:#1e293b;font-size:18px;margin:0 0 12px">${title}</h2>
               <p style="color:#475569;font-size:14px;line-height:1.7;margin:0 0 24px">${body}</p>
-              <a href="${this.configService.get('NEXT_PUBLIC_SITE_URL') ?? 'https://desentclub.com'}" style="background:#4f46e5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600">Visit Desent Club →</a>
+              <a href="${this.siteUrl}" style="background:#4f46e5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600">Visit Desent Club →</a>
               <p style="margin-top:24px;font-size:11px;color:#94a3b8">You received this because you have an account at Desent Club.</p>
             </div>
           </div>`;

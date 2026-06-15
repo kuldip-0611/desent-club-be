@@ -1,3 +1,4 @@
+import { resolveSiteUrl } from '../../common/site.constants'
 import { baseLayout, orderBadge, ctaButton, infoTable, divider, sectionHeading, alertBox } from './base.template'
 
 export interface OrderShippedData {
@@ -12,7 +13,7 @@ export interface OrderShippedData {
 
 export function buildOrderShippedEmail(data: OrderShippedData): string {
   const ref = data.orderId.slice(-8).toUpperCase()
-  const siteUrl = data.siteUrl ?? 'https://desentclub.com'
+  const siteUrl = resolveSiteUrl(data.siteUrl)
 
   // Tracking timeline steps
   const steps = [
