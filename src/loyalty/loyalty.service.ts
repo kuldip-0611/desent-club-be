@@ -2,21 +2,65 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { PrismaService } from '../prisma/prisma.service';
 import { LoyaltyTxType } from '@prisma/client';
 
-export const LOYALTY_RULES = {
-  pointsPerRupee: 1,        // 1 point per ₹1 spent
-  rupeePerPoint: 0.25,      // 1 point = ₹0.25 when redeeming
-  minRedeemPoints: 100,     // minimum 100 points to redeem
-  maxRedeemPercent: 20,     // max 20% of order value via points
-  referralBonus: 100,       // points for referrer when referred user places first order
-  referredBonus: 50,        // points for new user who used referral code
-  orderEarnMultiplier: 1,   // can boost during events
+// Fallback defaults (used only if DB row doesn't exist yet)
+export const LOYALTY_DEFAULTS = {
+  pointsPerRupee: 1,
+  rupeePerPoint: 0.25,
+  minRedeemPoints: 100,
+  maxRedeemPercent: 20,
+  referralBonus: 100,
+  referredBonus: 50,
+  orderEarnMultiplier: 1,
 };
+
+// Keep LOYALTY_RULES export for any code that still references it (order.service etc.)
+// It now acts as the fallback; runtime always reads from DB.
+export const LOYALTY_RULES = LOYALTY_DEFAULTS;
+
+export type LoyaltySettings = typeof LOYALTY_DEFAULTS;
 
 @Injectable()
 export class LoyaltyService {
   private readonly logger = new Logger(LoyaltyService.name);
 
   constructor(private readonly prisma: PrismaService) {}
+
+  // ── Settings (admin-configurable) ─────────────────────────────────────────
+
+  async getSettings(): Promise<LoyaltySettings> {
+    const row = await this.prisma.loyaltySetting.upsert({
+      where: { id: 'singleton' },
+      create: { id: 'singleton', ...LOYALTY_DEFAULTS },
+      update: {},
+    });
+    return {
+      pointsPerRupee: row.pointsPerRupee,
+      rupeePerPoint: row.rupeePerPoint,
+      minRedeemPoints: row.minRedeemPoints,
+      maxRedeemPercent: row.maxRedeemPercent,
+      referralBonus: row.referralBonus,
+      referredBonus: row.referredBonus,
+      orderEarnMultiplier: row.orderEarnMultiplier,
+    };
+  }
+
+  async updateSettings(data: Partial<LoyaltySettings>): Promise<LoyaltySettings> {
+    const row = await this.prisma.loyaltySetting.upsert({
+      where: { id: 'singleton' },
+      create: { id: 'singleton', ...LOYALTY_DEFAULTS, ...data },
+      update: data,
+    });
+    this.logger.log(`Loyalty settings updated: ${JSON.stringify(data)}`);
+    return {
+      pointsPerRupee: row.pointsPerRupee,
+      rupeePerPoint: row.rupeePerPoint,
+      minRedeemPoints: row.minRedeemPoints,
+      maxRedeemPercent: row.maxRedeemPercent,
+      referralBonus: row.referralBonus,
+      referredBonus: row.referredBonus,
+      orderEarnMultiplier: row.orderEarnMultiplier,
+    };
+  }
 
   // ── Get or create account ─────────────────────────────────────────────────
 
@@ -42,7 +86,8 @@ export class LoyaltyService {
   // ── Earn points on order ──────────────────────────────────────────────────
 
   async earnOnOrder(userId: string, orderId: string, orderTotal: number): Promise<number> {
-    const points = Math.floor(orderTotal * LOYALTY_RULES.pointsPerRupee * LOYALTY_RULES.orderEarnMultiplier);
+    const rules = await this.getSettings();
+    const points = Math.floor(orderTotal * rules.pointsPerRupee * rules.orderEarnMultiplier);
     if (points <= 0) return 0;
 
     await this.prisma.$transaction([
@@ -69,12 +114,13 @@ export class LoyaltyService {
   // ── Redeem points at checkout ─────────────────────────────────────────────
 
   async redeemPoints(userId: string, points: number, orderId: string): Promise<number> {
+    const rules = await this.getSettings();
     const account = await this.prisma.loyaltyAccount.findUnique({ where: { userId } });
-    if (!account || account.balance < points || points < LOYALTY_RULES.minRedeemPoints) {
+    if (!account || account.balance < points || points < rules.minRedeemPoints) {
       throw new Error('Insufficient loyalty points');
     }
 
-    const discount = points * LOYALTY_RULES.rupeePerPoint;
+    const discount = points * rules.rupeePerPoint;
 
     await this.prisma.$transaction([
       this.prisma.loyaltyAccount.update({
@@ -98,9 +144,10 @@ export class LoyaltyService {
   // ── Referral bonus ────────────────────────────────────────────────────────
 
   async giveReferralBonus(referrerId: string, referredUserId: string): Promise<void> {
+    const rules = await this.getSettings();
     await Promise.all([
-      this.addPoints(referrerId, LOYALTY_RULES.referralBonus, LoyaltyTxType.REFERRAL, 'Referral bonus — friend placed first order'),
-      this.addPoints(referredUserId, LOYALTY_RULES.referredBonus, LoyaltyTxType.REFERRAL, 'Welcome bonus — joined via referral'),
+      this.addPoints(referrerId, rules.referralBonus, LoyaltyTxType.REFERRAL, 'Referral bonus — friend placed first order'),
+      this.addPoints(referredUserId, rules.referredBonus, LoyaltyTxType.REFERRAL, 'Welcome bonus — joined via referral'),
     ]);
   }
 
@@ -122,11 +169,9 @@ export class LoyaltyService {
       throw new BadRequestException('Points adjustment cannot be zero');
     }
 
-    // Verify user exists
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true } });
     if (!user) throw new NotFoundException(`User ${userId} not found`);
 
-    // Get or create loyalty account to check current balance
     const account = await this.prisma.loyaltyAccount.upsert({
       where: { userId },
       create: { userId, balance: 0, totalEarned: 0, totalRedeemed: 0 },
@@ -135,7 +180,6 @@ export class LoyaltyService {
 
     const previousBalance = account.balance;
 
-    // Guard: cannot deduct more than current balance
     if (points < 0 && Math.abs(points) > previousBalance) {
       throw new BadRequestException(
         `Cannot deduct ${Math.abs(points)} points. User only has ${previousBalance} points.`,
@@ -143,16 +187,13 @@ export class LoyaltyService {
     }
 
     const newBalance = previousBalance + points;
-    const description = adminNote
-      ? `${reason} (Admin note: ${adminNote})`
-      : reason;
+    const description = adminNote ? `${reason} (Admin note: ${adminNote})` : reason;
 
     const [, tx] = await this.prisma.$transaction([
       this.prisma.loyaltyAccount.update({
         where: { userId },
         data: {
           balance: { increment: points },
-          // Track totals correctly
           ...(points > 0
             ? { totalEarned: { increment: points } }
             : { totalRedeemed: { increment: Math.abs(points) } }),
@@ -173,13 +214,23 @@ export class LoyaltyService {
       `${previousBalance} → ${newBalance}. Reason: ${reason}`,
     );
 
-    return {
-      userId,
-      previousBalance,
-      adjustedBy: points,
-      newBalance,
-      transactionId: tx.id,
-    };
+    return { userId, previousBalance, adjustedBy: points, newBalance, transactionId: tx.id };
+  }
+
+  // ── Admin: get all accounts ───────────────────────────────────────────────
+
+  async listAccounts(page = 1, limit = 20) {
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      this.prisma.loyaltyAccount.findMany({
+        skip,
+        take: limit,
+        orderBy: { balance: 'desc' },
+        include: { user: { select: { id: true, name: true, email: true } } },
+      }),
+      this.prisma.loyaltyAccount.count(),
+    ]);
+    return { items, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
@@ -196,29 +247,8 @@ export class LoyaltyService {
         },
       }),
       this.prisma.loyaltyTransaction.create({
-        data: {
-          account: { connect: { userId } },
-          type,
-          points,
-          description,
-        },
+        data: { account: { connect: { userId } }, type, points, description },
       }),
     ]);
-  }
-
-  // ── Admin: get all accounts with stats ───────────────────────────────────
-
-  async listAccounts(page = 1, limit = 20) {
-    const skip = (page - 1) * limit;
-    const [items, total] = await Promise.all([
-      this.prisma.loyaltyAccount.findMany({
-        skip,
-        take: limit,
-        orderBy: { balance: 'desc' },
-        include: { user: { select: { id: true, name: true, email: true } } },
-      }),
-      this.prisma.loyaltyAccount.count(),
-    ]);
-    return { items, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 }

@@ -761,6 +761,19 @@ model AffiliateClick {
 
 // ── Loyalty Points ────────────────────────────────────────────────────────────
 
+// Singleton — only one row ever (id = "singleton")
+model LoyaltySetting {
+  id                  String   @id @default("singleton")
+  pointsPerRupee      Float    @default(1)
+  rupeePerPoint       Float    @default(0.25)
+  minRedeemPoints     Int      @default(100)
+  maxRedeemPercent    Int      @default(20)
+  referralBonus       Int      @default(100)
+  referredBonus       Int      @default(50)
+  orderEarnMultiplier Float    @default(1)
+  updatedAt           DateTime @updatedAt
+}
+
 model LoyaltyAccount {
   id           String         @id @default(uuid())
   userId       String         @unique

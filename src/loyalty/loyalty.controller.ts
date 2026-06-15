@@ -2,11 +2,22 @@ import { Body, Controller, Get, Param, Patch, Query, Req, UseGuards } from '@nes
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { SkipThrottle } from '@nestjs/throttler';
+import { IsNumber, IsOptional, Min, Max, IsInt } from 'class-validator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
-import { LoyaltyService, LOYALTY_RULES } from './loyalty.service';
+import { LoyaltyService } from './loyalty.service';
 import { AdjustPointsDto } from './dto/adjust-points.dto';
+
+class UpdateLoyaltySettingsDto {
+  @IsOptional() @IsNumber() @Min(0) pointsPerRupee?: number;
+  @IsOptional() @IsNumber() @Min(0) rupeePerPoint?: number;
+  @IsOptional() @IsInt() @Min(1) minRedeemPoints?: number;
+  @IsOptional() @IsInt() @Min(1) @Max(100) maxRedeemPercent?: number;
+  @IsOptional() @IsInt() @Min(0) referralBonus?: number;
+  @IsOptional() @IsInt() @Min(0) referredBonus?: number;
+  @IsOptional() @IsNumber() @Min(0) orderEarnMultiplier?: number;
+}
 
 @ApiTags('Loyalty')
 @Controller()
@@ -25,12 +36,29 @@ export class LoyaltyController {
   }
 
   @Get('loyalty/rules')
-  @ApiOperation({ summary: 'Get loyalty program rules' })
+  @ApiOperation({ summary: 'Get loyalty program rules (from DB)' })
   getRules() {
-    return LOYALTY_RULES;
+    return this.loyaltyService.getSettings();
   }
 
   // ── Admin ─────────────────────────────────────────────────────────────────
+
+  @Get('admin/loyalty/settings')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: '[Admin] Get loyalty program settings' })
+  getSettings() {
+    return this.loyaltyService.getSettings();
+  }
+
+  @Patch('admin/loyalty/settings')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: '[Admin] Update loyalty program settings' })
+  @ApiBody({ type: UpdateLoyaltySettingsDto })
+  updateSettings(@Body() dto: UpdateLoyaltySettingsDto) {
+    return this.loyaltyService.updateSettings(dto);
+  }
 
   @Get('admin/loyalty')
   @UseGuards(RolesGuard)
@@ -46,33 +74,12 @@ export class LoyaltyController {
   @Patch('admin/loyalty/:userId/adjust')
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
-  @ApiOperation({
-    summary: '[Admin] Manually adjust user loyalty points',
-    description:
-      'Add (positive) or deduct (negative) points from a user\'s loyalty account. ' +
-      'Cannot deduct more than the user\'s current balance. Returns before/after snapshot.',
-  })
+  @ApiOperation({ summary: '[Admin] Manually adjust user loyalty points' })
   @ApiParam({ name: 'userId', description: 'The user\'s ID' })
   @ApiBody({ type: AdjustPointsDto })
-  @ApiResponse({
-    status: 200,
-    description: 'Points adjusted successfully',
-    schema: {
-      example: {
-        userId: 'clxyz123',
-        previousBalance: 250,
-        adjustedBy: 100,
-        newBalance: 350,
-        transactionId: 'clxyz456',
-      },
-    },
-  })
   @ApiResponse({ status: 400, description: 'Points is zero or deduction exceeds balance' })
   @ApiResponse({ status: 404, description: 'User not found' })
-  adjust(
-    @Param('userId') userId: string,
-    @Body() dto: AdjustPointsDto,
-  ) {
+  adjust(@Param('userId') userId: string, @Body() dto: AdjustPointsDto) {
     return this.loyaltyService.adjustPoints(userId, dto.points, dto.reason, dto.adminNote);
   }
 
