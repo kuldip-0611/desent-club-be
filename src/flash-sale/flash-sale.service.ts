@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
 export interface CreateFlashSaleDto {
@@ -33,6 +33,7 @@ export class FlashSaleService {
   }
 
   async create(dto: CreateFlashSaleDto) {
+    await this.assertProductsExist(dto.productIds);
     return this.prisma.flashSale.create({
       data: {
         title: dto.title,
@@ -47,6 +48,9 @@ export class FlashSaleService {
 
   async update(id: string, dto: UpdateFlashSaleDto) {
     await this.ensureExists(id);
+    if (dto.productIds !== undefined) {
+      await this.assertProductsExist(dto.productIds);
+    }
     return this.prisma.flashSale.update({
       where: { id },
       data: {
@@ -69,5 +73,18 @@ export class FlashSaleService {
   private async ensureExists(id: string) {
     const row = await this.prisma.flashSale.findUnique({ where: { id }, select: { id: true } });
     if (!row) throw new NotFoundException('Flash sale not found');
+  }
+
+  private async assertProductsExist(productIds: string[]): Promise<void> {
+    if (!productIds || productIds.length === 0) return;
+    const unique = [...new Set(productIds)];
+    const found = await this.prisma.product.count({
+      where: { id: { in: unique } },
+    });
+    if (found !== unique.length) {
+      throw new BadRequestException(
+        'One or more product IDs in the flash sale do not exist.',
+      );
+    }
   }
 }

@@ -103,5 +103,6 @@ export function buildReturnApprovedEmail(data: ReturnApprovedData): string {
   return baseLayout({
     preheader: `Your ${isExchange ? 'exchange' : 'return'} request for order #${ref} has been approved — pickup scheduled`,
     content,
+    logoUrl: `${siteUrl}/logo.png`,
   })
 }

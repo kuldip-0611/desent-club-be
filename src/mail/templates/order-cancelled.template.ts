@@ -58,5 +58,6 @@ export function buildOrderCancelledEmail(data: OrderCancelledData): string {
   return baseLayout({
     preheader: `Your order #${ref} has been cancelled${willRefund ? ` — refund of ₹${data.total.toFixed(2)} initiated` : ''}`,
     content,
+    logoUrl: `${siteUrl}/logo.png`,
   })
 }

@@ -106,6 +106,14 @@ export class SizeService {
 
   async remove(id: string) {
     await this.findOne(id);
+    const variantCount = await this.prisma.productVariant.count({
+      where: { sizeId: id },
+    });
+    if (variantCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete size: ${variantCount} product variant(s) are using it. Remove or reassign them first.`,
+      );
+    }
     await this.prisma.size.delete({ where: { id } });
   }
 

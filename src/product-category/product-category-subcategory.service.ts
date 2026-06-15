@@ -120,6 +120,14 @@ export class ProductCategorySubcategoryService {
 
   async remove(id: string) {
     const row = await this.findOne(id);
+    const productCount = await this.prisma.product.count({
+      where: { subcategoryId: id },
+    });
+    if (productCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete subcategory: ${productCount} product(s) belong to it. Reassign or delete those products first.`,
+      );
+    }
     await this.prisma.productCategorySubcategory.delete({ where: { id } });
     if (row.image) {
       await this.storage.delete(row.image).catch(() => undefined);

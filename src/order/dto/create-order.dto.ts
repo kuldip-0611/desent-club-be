@@ -3,6 +3,7 @@ import {
   IsArray,
   IsIn,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   IsUUID,
@@ -68,4 +69,18 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString()
   affiliateCode?: string;
+
+  /** Amount of store credit to apply to this order */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  storeCreditAmount?: number;
+
+  /** Loyalty points to redeem on this order */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  loyaltyPoints?: number;
 }

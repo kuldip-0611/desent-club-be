@@ -5,6 +5,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { join } from 'path';
 import { AppModule } from './app.module';
 import { ensureProfileUploadDir } from './user/multer.config';
+import { CancellationReasonService } from './cancellation-reason/cancellation-reason.service';
 
 async function bootstrap() {
   // Profile photos still stored locally (avatars are small & user-scoped)
@@ -31,6 +32,10 @@ async function bootstrap() {
     .build();
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, swaggerDocument);
+  // Seed default cancellation reasons if none exist
+  const cancelReasonService = app.get(CancellationReasonService);
+  await cancelReasonService.seed();
+
   await app.listen(process.env.PORT ?? 3000);
 }
 

@@ -618,6 +618,42 @@ export class ProductService {
       throw new NotFoundException('Product not found');
     }
 
+    // Guard: product referenced in order items (DB has onDelete: Restrict, but this gives a clear message)
+    const orderItemCount = await this.prisma.orderItem.count({
+      where: { productId: id },
+    });
+    if (orderItemCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete product: it appears in ${orderItemCount} order(s). Deactivate it instead to hide it from the shop.`,
+      );
+    }
+
+    // Guard: product is part of a bundle - removing it silently breaks bundle minItems
+    const bundleCount = await this.prisma.bundleProduct.count({
+      where: { productId: id },
+    });
+    if (bundleCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete product: it is included in ${bundleCount} bundle(s). Remove it from those bundles first.`,
+      );
+    }
+
+    // Guard: product ID present in a flash sale's JSON productIds array
+    const flashSalesWithProduct = await this.prisma.flashSale.findMany({
+      where: { isActive: true },
+      select: { id: true, title: true, productIds: true },
+    });
+    const affectedFlashSales = flashSalesWithProduct.filter((fs) => {
+      const ids = fs.productIds as string[];
+      return Array.isArray(ids) && ids.includes(id);
+    });
+    if (affectedFlashSales.length > 0) {
+      const titles = affectedFlashSales.map((fs) => `"${fs.title}"`).join(', ');
+      throw new BadRequestException(
+        `Cannot delete product: it is part of active flash sale(s): ${titles}. Remove it from those flash sales first.`,
+      );
+    }
+
     for (const img of product.images) {
       await this.unlinkStoredFile(img.path);
     }

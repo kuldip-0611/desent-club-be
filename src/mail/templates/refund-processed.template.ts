@@ -95,5 +95,6 @@ export function buildRefundProcessedEmail(data: RefundProcessedData): string {
   return baseLayout({
     preheader: `Refund of ₹${data.amount.toFixed(2)} initiated for order #${ref}`,
     content,
+    logoUrl: `${siteUrl}/logo.png`,
   })
 }

@@ -126,5 +126,6 @@ export function buildOrderConfirmationEmail(data: OrderConfirmationData): string
   return baseLayout({
     preheader: `Your order #${ref} is confirmed — ₹${data.total.toFixed(2)}`,
     content,
+    logoUrl: `${siteUrl}/logo.png`,
   })
 }

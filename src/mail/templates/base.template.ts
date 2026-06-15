@@ -3,8 +3,10 @@ export function baseLayout(opts: {
   preheader?: string
   content: string
   year?: number
+  /** Absolute URL of the brand logo image (e.g. https://desentclub.com/logo.png) */
+  logoUrl?: string
 }): string {
-  const { preheader = '', content, year = new Date().getFullYear() } = opts
+  const { preheader = '', content, year = new Date().getFullYear(), logoUrl } = opts
 
   return `<!DOCTYPE html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
@@ -52,15 +54,21 @@ export function baseLayout(opts: {
                     <!-- Logo -->
                     <table width="100%" cellpadding="0" cellspacing="0" border="0">
                       <tr>
-                        <td>
-                          <div style="font-size:26px;font-weight:900;color:#ffffff;letter-spacing:-0.5px;line-height:1">
-                            Desent<span style="color:#c7d2fe"> Club</span>
-                          </div>
-                          <div style="font-size:10px;color:rgba(255,255,255,0.6);letter-spacing:0.18em;text-transform:uppercase;margin-top:4px">Premium Fashion</div>
+                        <td style="vertical-align:middle">
+                          ${logoUrl
+                            ? `<img src="${logoUrl}" alt="Desent Club" width="130" height="auto" border="0"
+                                 style="display:block;max-width:130px;height:auto" />`
+                            : `<div style="font-size:26px;font-weight:900;color:#ffffff;letter-spacing:-0.5px;line-height:1">Desent<span style="color:#c7d2fe"> Club</span></div>
+                               <div style="font-size:10px;color:rgba(255,255,255,0.6);letter-spacing:0.18em;text-transform:uppercase;margin-top:4px">Premium Fashion</div>`
+                          }
                         </td>
-                        <td align="right" style="vertical-align:top">
-                          <!-- Decorative circles -->
-                          <div style="width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,0.1);display:inline-block"></div>
+                        <td align="right" style="vertical-align:middle;width:60px">
+                          <!-- Decorative circle (table-based for email client compatibility) -->
+                          <table cellpadding="0" cellspacing="0" border="0" align="right">
+                            <tr>
+                              <td width="56" height="56" style="width:56px;height:56px;border-radius:28px;background:rgba(255,255,255,0.12);font-size:0;line-height:0">&nbsp;</td>
+                            </tr>
+                          </table>
                         </td>
                       </tr>
                     </table>

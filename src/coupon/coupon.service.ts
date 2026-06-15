@@ -248,6 +248,14 @@ export class CouponService {
 
   async remove(id: string): Promise<void> {
     await this.findOne(id);
+    const redemptionCount = await this.prisma.couponRedemption.count({
+      where: { couponId: id },
+    });
+    if (redemptionCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete coupon: it has been redeemed ${redemptionCount} time(s). Deactivate it instead to preserve the order audit trail.`,
+      );
+    }
     await this.prisma.coupon.delete({ where: { id } });
   }
 

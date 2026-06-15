@@ -92,6 +92,14 @@ export class UserGroupService {
 
   async remove(id: string) {
     await this.findOne(id);
+    const couponLinkCount = await this.prisma.couponUserGroup.count({
+      where: { userGroupId: id },
+    });
+    if (couponLinkCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete user group: it has ${couponLinkCount} coupon(s) assigned to it. Unassign those coupons first.`,
+      );
+    }
     await this.prisma.userGroup.delete({ where: { id } });
   }
 

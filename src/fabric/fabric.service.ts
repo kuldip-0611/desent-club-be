@@ -68,6 +68,14 @@ export class FabricService {
 
   async remove(id: string) {
     await this.findOne(id);
+    const productCount = await this.prisma.productFabric.count({
+      where: { fabricId: id },
+    });
+    if (productCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete fabric: ${productCount} product(s) list it in their composition. Remove it from those products first.`,
+      );
+    }
     await this.prisma.fabric.delete({ where: { id } });
   }
 }

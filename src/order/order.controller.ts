@@ -139,6 +139,16 @@ export class OrderController {
     return this.orderService.getOrderById(id, req.user.sub);
   }
 
+  @Patch('orders/my/:id/address')
+  @ApiOperation({ summary: 'Update delivery address for a PENDING or CONFIRMED order' })
+  updateShippingAddress(
+    @Request() req: { user: { sub: string } },
+    @Param('id') id: string,
+    @Body() body: { addressId: string },
+  ) {
+    return this.orderService.updateShippingAddress(req.user.sub, id, body.addressId);
+  }
+
   @Post('orders/my/:id/cancel')
   @ApiOperation({ summary: 'Cancel order (before shipment)' })
   cancelOrder(

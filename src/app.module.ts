@@ -29,6 +29,8 @@ import { BundleModule } from './bundle/bundle.module';
 import { StorageModule } from './storage/storage.module';
 import { LoyaltyModule } from './loyalty/loyalty.module';
 import { ReferralModule } from './referral/referral.module';
+import { CancellationReasonModule } from './cancellation-reason/cancellation-reason.module';
+import { StoreCreditModule } from './store-credit/store-credit.module';
 
 @Module({
   imports: [
@@ -62,6 +64,8 @@ import { ReferralModule } from './referral/referral.module';
     FlashSaleModule,
     MailModule,
     BundleModule,
+    CancellationReasonModule,
+    StoreCreditModule,
   ],
   controllers: [AppController],
   providers: [

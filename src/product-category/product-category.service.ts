@@ -92,6 +92,14 @@ export class ProductCategoryService {
 
   async remove(id: string) {
     const existing = await this.findOne(id);
+    const productCount = await this.prisma.product.count({
+      where: { categoryId: id },
+    });
+    if (productCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete category: ${productCount} product(s) belong to it. Reassign or delete those products first.`,
+      );
+    }
     await this.prisma.productCategory.delete({ where: { id } });
     if (existing.image) {
       await this.storage.delete(existing.image).catch(() => undefined);

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -67,6 +67,7 @@ export class BundleService {
   }
 
   async create(dto: CreateBundleDto) {
+    await this.assertProductsExist(dto.productIds);
     const bundle = await this.prisma.bundle.create({
       data: {
         name: dto.name,
@@ -104,6 +105,7 @@ export class BundleService {
 
     // Replace products if provided
     if (dto.productIds !== undefined) {
+      await this.assertProductsExist(dto.productIds);
       await this.prisma.bundleProduct.deleteMany({ where: { bundleId: id } });
       data.products = {
         create: dto.productIds.map((productId) => ({ productId })),
@@ -182,5 +184,18 @@ export class BundleService {
     const bundle = await this.prisma.bundle.findUnique({ where: { id } });
     if (!bundle) throw new NotFoundException('Bundle not found');
     return bundle;
+  }
+
+  private async assertProductsExist(productIds: string[]): Promise<void> {
+    if (!productIds || productIds.length === 0) return;
+    const unique = [...new Set(productIds)];
+    const found = await this.prisma.product.count({
+      where: { id: { in: unique } },
+    });
+    if (found !== unique.length) {
+      throw new BadRequestException(
+        'One or more product IDs in the bundle do not exist.',
+      );
+    }
   }
 }

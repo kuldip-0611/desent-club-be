@@ -69,5 +69,6 @@ export function buildOrderDeliveredEmail(data: OrderDeliveredData): string {
   return baseLayout({
     preheader: `Your Desent Club order #${ref} has been delivered — share your experience!`,
     content,
+    logoUrl: `${siteUrl}/logo.png`,
   })
 }

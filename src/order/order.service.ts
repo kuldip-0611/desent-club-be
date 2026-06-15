@@ -19,8 +19,9 @@ import { NotificationService } from '../notification/notification.service';
 import { CouponService } from '../coupon/coupon.service';
 import { ShiprocketService } from '../shiprocket/shiprocket.service';
 import { MailService } from '../mail/mail.service';
-import { LoyaltyService } from '../loyalty/loyalty.service';
+import { LoyaltyService, LOYALTY_RULES } from '../loyalty/loyalty.service';
 import { ReferralService } from '../referral/referral.service';
+import { StoreCreditService } from '../store-credit/store-credit.service';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -50,6 +51,7 @@ export class OrderService {
     private readonly mail: MailService,
     private readonly loyalty: LoyaltyService,
     private readonly referral: ReferralService,
+    private readonly storeCredit: StoreCreditService,
   ) {
     this.razorpay = new Razorpay({
       key_id: this.config.getOrThrow<string>('RAZORPAY_KEY_ID'),
@@ -176,7 +178,30 @@ export class OrderService {
     const shipping = subtotal.gt(1999) ? new Prisma.Decimal(0) : new Prisma.Decimal(99);
     const gstBreakup = this.calculateGst(taxable);
     const gst = gstBreakup.igst; // inter-state default
-    const total = taxable.add(shipping).add(gst);
+    let total = taxable.add(shipping).add(gst);
+
+    // Apply loyalty points discount (capped at maxRedeemPercent% of order total)
+    let loyaltyPointsToRedeem = 0;
+    let loyaltyDiscount = new Prisma.Decimal(0);
+    if (dto.loyaltyPoints && dto.loyaltyPoints >= LOYALTY_RULES.minRedeemPoints) {
+      const loyaltyBalance = await this.loyalty.getBalance(userId);
+      const safePoints = Math.min(dto.loyaltyPoints, loyaltyBalance);
+      const maxDiscount = total.mul(LOYALTY_RULES.maxRedeemPercent / 100);
+      const potentialDiscount = new Prisma.Decimal(safePoints * LOYALTY_RULES.rupeePerPoint);
+      loyaltyDiscount = Prisma.Decimal.min(potentialDiscount, maxDiscount, total);
+      loyaltyPointsToRedeem = Math.ceil(loyaltyDiscount.toNumber() / LOYALTY_RULES.rupeePerPoint);
+      total = Prisma.Decimal.max(total.sub(loyaltyDiscount), new Prisma.Decimal(0));
+    }
+
+    // Apply store credit (up to full order total)
+    let storeCreditApplied = new Prisma.Decimal(0);
+    if (dto.storeCreditAmount && dto.storeCreditAmount > 0) {
+      const creditBalance = await this.storeCredit.getBalance(userId);
+      const requested = new Prisma.Decimal(dto.storeCreditAmount);
+      storeCreditApplied = Prisma.Decimal.min(requested, new Prisma.Decimal(creditBalance), total);
+      total = Prisma.Decimal.max(total.sub(storeCreditApplied), new Prisma.Decimal(0));
+    }
+
     const amountPaise = Math.round(total.toNumber() * 100);
 
     let shippingAddress: Prisma.JsonValue | undefined;
@@ -314,6 +339,16 @@ export class OrderService {
         }
       }).catch(() => undefined);
 
+      // Redeem loyalty points if requested
+      if (loyaltyPointsToRedeem > 0) {
+        this.loyalty.redeemPoints(userId, loyaltyPointsToRedeem, order.id).catch(() => undefined);
+      }
+
+      // Apply store credit if requested
+      if (storeCreditApplied.gt(0)) {
+        this.storeCredit.applyCredit(userId, storeCreditApplied.toNumber(), order.id).catch(() => undefined);
+      }
+
       return {
         orderId: order.id,
         paymentMethod: 'COD',
@@ -363,6 +398,16 @@ export class OrderService {
       this.prisma.affiliateClick.create({
         data: { code: dto.affiliateCode, orderId: order.id, userId },
       }).catch(() => undefined);
+    }
+
+    // Redeem loyalty points (online — applied upfront)
+    if (loyaltyPointsToRedeem > 0) {
+      this.loyalty.redeemPoints(userId, loyaltyPointsToRedeem, order.id).catch(() => undefined);
+    }
+
+    // Apply store credit immediately (even for online orders)
+    if (storeCreditApplied.gt(0)) {
+      this.storeCredit.applyCredit(userId, storeCreditApplied.toNumber(), order.id).catch(() => undefined);
     }
 
     return {
@@ -736,12 +781,20 @@ export class OrderService {
 
     const now = new Date();
     const cancelReason = dto.reason?.trim() || 'Cancelled by customer';
+    const isVariantChange = dto.variantChange === true;
 
     // ── Step 1: mark CANCELLED + restore stock (atomic) ───────────────────────
     await this.prisma.$transaction(async (tx) => {
       await tx.order.update({
         where: { id: orderId },
-        data: { status: OrderStatus.CANCELLED, cancelledAt: now, cancelReason },
+        data: {
+          status: OrderStatus.CANCELLED,
+          cancelledAt: now,
+          cancelReason,
+          cancelVariantChange: isVariantChange,
+          requestedSize: dto.requestedSize?.trim() ?? null,
+          requestedColor: dto.requestedColor?.trim() ?? null,
+        },
       });
 
       // Only restore stock if order was CONFIRMED/PROCESSING (inventory was decremented)
@@ -812,6 +865,41 @@ export class OrderService {
       orderId,
       refund: refundMode !== 'none' ? { mode: refundMode, razorpayRefundId, message: refundMessage } : null,
     };
+  }
+
+  async updateShippingAddress(userId: string, orderId: string, addressId: string): Promise<{ message: string }> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    const updatableStatuses: string[] = [OrderStatus.PENDING, OrderStatus.CONFIRMED];
+    if (!updatableStatuses.includes(order.status)) {
+      throw new BadRequestException(
+        `Delivery address can only be changed for orders that are PENDING or CONFIRMED. This order is ${order.status}.`,
+      );
+    }
+
+    const addr = await this.prisma.userAddress.findFirst({ where: { id: addressId, userId } });
+    if (!addr) throw new NotFoundException('Address not found');
+
+    const shippingAddress = {
+      fullName: addr.fullName,
+      phone: addr.phone,
+      line1: addr.line1,
+      line2: addr.line2,
+      city: addr.city,
+      state: addr.state,
+      pincode: addr.pincode,
+      country: addr.country,
+    };
+
+    await this.prisma.order.update({
+      where: { id: orderId },
+      data: { shippingAddress },
+    });
+
+    return { message: 'Delivery address updated successfully' };
   }
 
   /**
@@ -913,16 +1001,20 @@ export class OrderService {
         userId,
         reason: dto.reason.trim(),
         type: returnType,
+        refundMethod: returnType === 'EXCHANGE' ? 'BANK' : (dto.refundMethod ?? 'BANK'),
         orderItemId: returnType === 'EXCHANGE' ? dto.orderItemId : null,
         exchangeSize: returnType === 'EXCHANGE' ? dto.exchangeSize!.trim() : null,
         status: ReturnStatus.REQUESTED,
       },
     });
 
+    const isStoreCredit = returnType === 'RETURN' && dto.refundMethod === 'STORE_CREDIT';
     const message =
       returnType === 'EXCHANGE'
         ? `Size exchange request submitted — you requested size ${dto.exchangeSize}`
-        : 'Return request submitted';
+        : isStoreCredit
+          ? 'Return request submitted — store credit will be added instantly once approved'
+          : 'Return request submitted — refund will be processed to your original payment method';
 
     return { message, returnId: returnRequest.id };
   }
@@ -1101,7 +1193,7 @@ export class OrderService {
 
     let refundInfo: {
       processed: boolean;
-      mode: 'razorpay' | 'local' | 'cod' | 'none';
+      mode: 'razorpay' | 'local' | 'cod' | 'none' | 'store_credit';
       razorpayRefundId?: string;
       amount?: number;
     } | null = null;
@@ -1223,23 +1315,40 @@ export class OrderService {
       }
     }
 
-    // ── REFUNDED (RETURN only): process Razorpay refund ───────────────────────
+    // ── REFUNDED (RETURN only): process refund via bank or store credit ──────
     if (dto.status === ReturnStatus.REFUNDED) {
       const payment = returnRequest.order.payment;
-      if (payment) {
-        refundInfo = await this.processReturnRefund(payment);
-        updates.push(
-          this.prisma.payment.update({
-            where: { id: payment.id },
-            data: {
-              status: PaymentStatus.REFUNDED,
-              razorpayRefundId: refundInfo.razorpayRefundId ?? payment.razorpayRefundId,
-              refundedAt: new Date(),
-            },
-          }),
-        );
+      const useStoreCredit = returnRequest.refundMethod === 'STORE_CREDIT';
+
+      if (useStoreCredit) {
+        // Store credit path — instant credit, no Razorpay call
+        const refundAmt = payment ? Number(payment.amount) : 0;
+        if (refundAmt > 0) {
+          await this.storeCredit.addFromReturn(
+            returnRequest.userId,
+            refundAmt,
+            returnId,
+            returnRequest.orderId,
+          );
+        }
+        refundInfo = { processed: true, mode: 'store_credit', amount: refundAmt * 100 };
       } else {
-        refundInfo = { processed: false, mode: 'none' };
+        // Bank refund path — Razorpay
+        if (payment) {
+          refundInfo = await this.processReturnRefund(payment);
+          updates.push(
+            this.prisma.payment.update({
+              where: { id: payment.id },
+              data: {
+                status: PaymentStatus.REFUNDED,
+                razorpayRefundId: refundInfo.razorpayRefundId ?? payment.razorpayRefundId,
+                refundedAt: new Date(),
+              },
+            }),
+          );
+        } else {
+          refundInfo = { processed: false, mode: 'none' };
+        }
       }
 
       updates.push(
@@ -1250,11 +1359,15 @@ export class OrderService {
       );
 
       // Notify user
+      const notifMsg = useStoreCredit
+        ? `Store credit of ₹${refundInfo?.amount ? (refundInfo.amount / 100).toFixed(2) : '0'} has been added to your account.`
+        : `Your refund for order #${returnRequest.orderId.slice(-8).toUpperCase()} has been processed.`;
+
       this.notification
         .persistAndPush(
           returnRequest.userId,
-          'Refund processed 💰',
-          `Your refund for order #${returnRequest.orderId.slice(-8).toUpperCase()} has been processed.`,
+          useStoreCredit ? 'Store credit added 🎉' : 'Refund processed 💰',
+          notifMsg,
           'order',
           returnRequest.order.user.fcmToken ?? undefined,
           { returnId, orderId: returnRequest.orderId },
@@ -1262,15 +1375,19 @@ export class OrderService {
         .catch(() => undefined);
 
       if (returnRequest.order.user.email && refundInfo?.amount) {
-        this.mail
-          .sendRefundProcessed({
-            to: returnRequest.order.user.email,
-            name: returnRequest.order.user.name,
-            orderId: returnRequest.orderId,
-            amount: refundInfo.amount / 100,
-            paymentMethod: 'ONLINE',
-          })
-          .catch((err: Error) => console.error('[Mail]', err?.message));
+        if (useStoreCredit) {
+          // TODO: send store-credit email when mail template is ready
+        } else {
+          this.mail
+            .sendRefundProcessed({
+              to: returnRequest.order.user.email,
+              name: returnRequest.order.user.name,
+              orderId: returnRequest.orderId,
+              amount: refundInfo.amount / 100,
+              paymentMethod: 'ONLINE',
+            })
+            .catch((err: Error) => console.error('[Mail]', err?.message));
+        }
       }
     }
 
@@ -1447,7 +1564,7 @@ export class OrderService {
 
   private async processReturnRefund(payment: Payment): Promise<{
     processed: boolean;
-    mode: 'razorpay' | 'local' | 'cod' | 'none';
+    mode: 'razorpay' | 'local' | 'cod' | 'none' | 'store_credit';
     razorpayRefundId?: string;
     amount?: number;
   }> {

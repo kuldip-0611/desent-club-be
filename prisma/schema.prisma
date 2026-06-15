@@ -119,6 +119,7 @@ model User {
   backInStockAlerts   BackInStockAlert[]
   npsSurveyResponses  NpsSurveyResponse[]
   loyaltyAccount      LoyaltyAccount?
+  storeCredit         StoreCredit?
   referralCode        ReferralCode?
   referral            Referral?           @relation("ReferredUser")
 
@@ -440,6 +441,11 @@ enum ReturnType {
   EXCHANGE
 }
 
+enum ReturnRefundMethod {
+  BANK         // refund to original payment method (5-7 days)
+  STORE_CREDIT // instant store credit added to account
+}
+
 enum ReturnStatus {
   REQUESTED
   APPROVED
@@ -462,9 +468,12 @@ model Order {
   shippingAddressId String?
   shippingAddress   Json?
   notes             String?     @db.Text
-  cancelReason      String?     @db.Text
-  deliveredAt       DateTime?
-  cancelledAt       DateTime?
+  cancelReason          String?     @db.Text
+  cancelVariantChange   Boolean     @default(false)
+  requestedSize         String?     @db.VarChar(20)
+  requestedColor        String?     @db.VarChar(100)
+  deliveredAt           DateTime?
+  cancelledAt           DateTime?
   shiprocketOrderId String?
   awbCode           String?
   courierName       String?
@@ -488,17 +497,19 @@ model Order {
 }
 
 model ReturnRequest {
-  id           String       @id @default(uuid())
+  id           String             @id @default(uuid())
   orderId      String
-  order        Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order        Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
   userId       String
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  reason       String       @db.Text
-  type         ReturnType   @default(RETURN)
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reason       String             @db.Text
+  type         ReturnType         @default(RETURN)
+  refundMethod ReturnRefundMethod @default(BANK)
   orderItemId  String?
-  exchangeSize String?      @db.VarChar(64)
-  status       ReturnStatus @default(REQUESTED)
-  adminNote    String?      @db.Text
+  exchangeSize String?            @db.VarChar(64)
+  status       ReturnStatus       @default(REQUESTED)
+  refundAmount Decimal?           @db.Decimal(10, 2)
+  adminNote    String?            @db.Text
 
   // Shiprocket reverse pickup (created when admin approves)
   returnShiprocketOrderId String? @db.VarChar(64)
@@ -808,4 +819,50 @@ model Referral {
   createdAt      DateTime     @default(now())
 
   @@index([referralCodeId])
+}
+
+// ── Store Credit ──────────────────────────────────────────────────────────────
+
+model StoreCredit {
+  id           String               @id @default(uuid())
+  userId       String               @unique
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance      Decimal              @default(0) @db.Decimal(10, 2)
+  totalEarned  Decimal              @default(0) @db.Decimal(10, 2)
+  totalUsed    Decimal              @default(0) @db.Decimal(10, 2)
+  transactions StoreCreditTx[]
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+}
+
+model StoreCreditTx {
+  id          String      @id @default(uuid())
+  creditId    String
+  credit      StoreCredit @relation(fields: [creditId], references: [id], onDelete: Cascade)
+  amount      Decimal     @db.Decimal(10, 2)
+  type        StoreCreditTxType
+  description String      @db.VarChar(300)
+  returnId    String?
+  orderId     String?
+  createdAt   DateTime    @default(now())
+
+  @@index([creditId])
+}
+
+enum StoreCreditTxType {
+  EARNED   // credit added from return
+  USED     // credit applied at checkout
+  EXPIRED  // unused credit expired
+  ADJUSTED // manual admin adjustment
+}
+
+// ── Cancellation Reasons (Admin-managed) ─────────────────────────────────────
+
+model CancellationReason {
+  id        String   @id @default(uuid())
+  label     String   @db.VarChar(200)
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

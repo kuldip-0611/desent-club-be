@@ -72,6 +72,22 @@ export class MeasurementAttributeService {
 
   async remove(id: string) {
     await this.findOne(id);
+    const productUseCount = await this.prisma.productMeasurementAttribute.count({
+      where: { attributeId: id },
+    });
+    if (productUseCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete measurement attribute: ${productUseCount} product(s) are using it. Remove it from those products first.`,
+      );
+    }
+    const sizeUseCount = await this.prisma.sizeMeasurementValue.count({
+      where: { attributeId: id },
+    });
+    if (sizeUseCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete measurement attribute: ${sizeUseCount} size(s) have measurements for it. Clear those values first.`,
+      );
+    }
     await this.prisma.measurementAttribute.delete({ where: { id } });
   }
 }
