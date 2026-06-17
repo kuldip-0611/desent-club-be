@@ -22,6 +22,7 @@ import { MailService } from '../mail/mail.service';
 import { LoyaltyService, LOYALTY_RULES } from '../loyalty/loyalty.service';
 import { ReferralService } from '../referral/referral.service';
 import { StoreCreditService } from '../store-credit/store-credit.service';
+import { GiftCardService } from '../gift-card/gift-card.service';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -52,6 +53,7 @@ export class OrderService {
     private readonly loyalty: LoyaltyService,
     private readonly referral: ReferralService,
     private readonly storeCredit: StoreCreditService,
+    private readonly giftCard: GiftCardService,
   ) {
     this.razorpay = new Razorpay({
       key_id: this.config.getOrThrow<string>('RAZORPAY_KEY_ID'),
@@ -77,6 +79,7 @@ export class OrderService {
     amount: number;
     currency: string;
     keyId?: string;
+    codOtp?: string;
   }> {
     if (!dto.items.length) {
       throw new BadRequestException('Order must contain at least one item');
@@ -202,6 +205,16 @@ export class OrderService {
       total = Prisma.Decimal.max(total.sub(storeCreditApplied), new Prisma.Decimal(0));
     }
 
+    // Apply gift card (up to remaining total)
+    let giftCardDiscount = new Prisma.Decimal(0);
+    let giftCardId: string | undefined;
+    if (dto.giftCardCode) {
+      const gcResult = await this.giftCard.applyToOrder(dto.giftCardCode, total.toNumber());
+      giftCardDiscount = new Prisma.Decimal(gcResult.discountAmount);
+      giftCardId = gcResult.giftCardId;
+      total = Prisma.Decimal.max(total.sub(giftCardDiscount), new Prisma.Decimal(0));
+    }
+
     const amountPaise = Math.round(total.toNumber() * 100);
 
     let shippingAddress: Prisma.JsonValue | undefined;
@@ -226,6 +239,10 @@ export class OrderService {
     const isCod = dto.paymentMethod === 'COD';
 
     if (isCod) {
+      // COD: generate OTP for delivery verification
+      const codOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      const codOtpExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
       // COD: skip Razorpay, confirm order immediately
       const order = await this.prisma.order.create({
         data: {
@@ -242,6 +259,8 @@ export class OrderService {
           couponId,
           shippingAddress: shippingAddress ?? Prisma.JsonNull,
           notes: dto.notes,
+          codOtp,
+          codOtpExpiresAt,
           items: { create: orderItems },
           payment: {
             create: {
@@ -349,9 +368,25 @@ export class OrderService {
         this.storeCredit.applyCredit(userId, storeCreditApplied.toNumber(), order.id).catch(() => undefined);
       }
 
+      // Deduct gift card balance if used
+      if (giftCardId && giftCardDiscount.gt(0)) {
+        this.giftCard.deductBalance(giftCardId, giftCardDiscount.toNumber()).catch(() => undefined);
+      }
+
+      // Send OTP via email (fire-and-forget)
+      if (order.user.email) {
+        this.mail.sendRaw({
+          to: order.user.email,
+          subject: `Your COD Delivery OTP for Order #${order.id.slice(-8).toUpperCase()} | Disent Club`,
+          html: `<p>Hi ${order.user.name},</p><p>Your OTP for COD order <strong>#${order.id.slice(-8).toUpperCase()}</strong> is: <strong style="font-size:24px;letter-spacing:4px">${codOtp}</strong></p><p>Share this OTP with the delivery agent to confirm delivery. Valid for 7 days.</p>`,
+          text: `Hi ${order.user.name}, your COD OTP for order #${order.id.slice(-8).toUpperCase()} is: ${codOtp}. Share this with the delivery agent.`,
+        }).catch((err: Error) => console.error('[COD OTP Mail]', err?.message));
+      }
+
       return {
         orderId: order.id,
         paymentMethod: 'COD',
+        codOtp,
         amount: amountPaise,
         currency: 'INR',
       };
@@ -408,6 +443,11 @@ export class OrderService {
     // Apply store credit immediately (even for online orders)
     if (storeCreditApplied.gt(0)) {
       this.storeCredit.applyCredit(userId, storeCreditApplied.toNumber(), order.id).catch(() => undefined);
+    }
+
+    // Deduct gift card balance if used
+    if (giftCardId && giftCardDiscount.gt(0)) {
+      this.giftCard.deductBalance(giftCardId, giftCardDiscount.toNumber()).catch(() => undefined);
     }
 
     return {
@@ -545,6 +585,27 @@ export class OrderService {
     }).catch(() => undefined);
 
     return { message: 'Payment verified successfully', orderId: payment.orderId };
+  }
+
+  async verifyCodOtp(userId: string, orderId: string, otp: string) {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+      select: { id: true, codOtp: true, codOtpExpiresAt: true, codOtpVerified: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.codOtpVerified) return { message: 'OTP already verified', verified: true };
+    if (!order.codOtp) throw new BadRequestException('No OTP associated with this order');
+    if (order.codOtpExpiresAt && order.codOtpExpiresAt < new Date()) {
+      throw new BadRequestException('OTP has expired');
+    }
+    if (order.codOtp !== otp.trim()) {
+      throw new BadRequestException('Invalid OTP');
+    }
+    await this.prisma.order.update({
+      where: { id: orderId },
+      data: { codOtpVerified: true },
+    });
+    return { message: 'OTP verified successfully', verified: true };
   }
 
   async getUserOrders(userId: string, page = 1, limit = 10) {
@@ -2161,7 +2222,7 @@ export class OrderService {
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <title>Invoice #${ref} — Desent Club</title>
+  <title>Invoice #${ref} — Disent Club</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:'Segoe UI',Arial,sans-serif;background:#f8fafc;color:#1e293b;padding:32px}
@@ -2195,7 +2256,10 @@ export class OrderService {
 <body>
   <div class="card">
     <div class="header">
-      <div class="brand">Desent Club<span>Premium Fashion</span></div>
+      <div class="brand">
+        <img src="https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png" alt="Disent Club" style="height:48px;width:auto;display:block;margin-bottom:4px" onerror="this.style.display='none';this.nextElementSibling.style.display='block'" />
+        <span style="display:none;font-size:22px;font-weight:900;color:#ffffff">Disent Club<span style="font-size:10px;font-weight:500;display:block;letter-spacing:0.15em;margin-top:2px">PREMIUM FASHION</span></span>
+      </div>
       <div class="invoice-meta">
         <strong>TAX INVOICE</strong>
         <div>Invoice #${ref}</div>
@@ -2249,7 +2313,7 @@ export class OrderService {
     </table>
 
     <div class="footer">
-      Thank you for shopping with Desent Club! For support, contact ${this.supportEmail} (${this.supportPhoneDisplay})<br/>
+      Thank you for shopping with Disent Club! For support, contact ${this.supportEmail} (${this.supportPhoneDisplay})<br/>
       This is a computer-generated invoice and does not require a signature.
     </div>
   </div>
@@ -2385,7 +2449,7 @@ export class OrderService {
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Invoice #${ref} — Desent Club</title>
+  <title>Invoice #${ref} — Disent Club</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2659,8 +2723,11 @@ export class OrderService {
   <!-- HEADER -->
   <div class="header">
     <div class="logo">
-      <div class="logo-wordmark">Desent<span> Club</span></div>
-      <div class="logo-tagline">Premium Fashion</div>
+      <img src="https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png" alt="Disent Club" style="height:44px;width:auto;display:block" onerror="this.style.display='none';this.nextElementSibling.style.display='block'" />
+      <div style="display:none">
+        <div class="logo-wordmark">Disent<span> Club</span></div>
+        <div class="logo-tagline">PREMIUM FASHION</div>
+      </div>
     </div>
     <div class="inv-meta">
       <div class="inv-label">Tax Invoice</div>
@@ -2725,13 +2792,14 @@ export class OrderService {
   <!-- FOOTER -->
   <div class="footer">
     <div class="footer-note">
-      <strong>Thank you for shopping with Desent Club!</strong><br/>
+      <strong>Thank you for shopping with Disent Club!</strong><br/>
       For support, contact <strong>${this.supportEmail}</strong> · <strong>${this.supportPhoneDisplay}</strong><br/>
       This is a system-generated invoice and does not require a physical signature.
     </div>
     <div class="footer-brand">
-      Desent<span> Club</span>
-      <small>Premium Fashion</small>
+      <img src="https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png" alt="Disent Club" style="height:32px;width:auto;display:inline-block;vertical-align:middle" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" />
+      <span style="display:none">Disent<span> Club</span></span>
+      <small>PREMIUM FASHION</small>
     </div>
   </div>
 

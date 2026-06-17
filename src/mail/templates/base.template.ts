@@ -1,4 +1,4 @@
-/** Shared base layout for all Desent Club transactional emails */
+/** Shared base layout for all Disent Club transactional emails */
 import { resolveSiteUrl } from '../../common/site.constants'
 
 export function baseLayout(opts: {
@@ -23,7 +23,7 @@ export function baseLayout(opts: {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-  <title>Desent Club</title>
+  <title>Disent Club</title>
   <!--[if mso]>
   <noscript>
     <xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml>
@@ -65,9 +65,9 @@ export function baseLayout(opts: {
                       <tr>
                         <td style="vertical-align:middle">
                           ${logoUrl
-                            ? `<img src="${logoUrl}" alt="Desent Club" width="130" height="auto" border="0"
+                            ? `<img src="${logoUrl}" alt="Disent Club" width="130" height="auto" border="0"
                                  style="display:block;max-width:130px;height:auto" />`
-                            : `<div style="font-size:26px;font-weight:900;color:#ffffff;letter-spacing:-0.5px;line-height:1">Desent<span style="color:#c7d2fe"> Club</span></div>
+                            : `<div style="font-size:26px;font-weight:900;color:#ffffff;letter-spacing:-0.5px;line-height:1">Disent<span style="color:#c7d2fe"> Club</span></div>
                                <div style="font-size:10px;color:rgba(255,255,255,0.6);letter-spacing:0.18em;text-transform:uppercase;margin-top:4px">Premium Fashion</div>`
                           }
                         </td>
@@ -101,18 +101,18 @@ export function baseLayout(opts: {
                 <tr>
                   <td align="center">
                     <div style="font-size:18px;font-weight:900;color:#6366f1;letter-spacing:-0.3px;margin-bottom:12px">
-                      Desent<span style="color:#c7d2fe"> Club</span>
+                      Disent<span style="color:#c7d2fe"> Club</span>
                     </div>
                     <p style="margin:0 0 8px;font-size:13px;color:#64748b">
                       Need help? Email us at
-                      <a href="mailto:support@desentclub.com" style="color:#6366f1;text-decoration:none;font-weight:600">support@desentclub.com</a>
+                      <a href="mailto:support@disentclub.com" style="color:#6366f1;text-decoration:none;font-weight:600">support@disentclub.com</a>
                     </p>
                     <p style="margin:0 0 16px;font-size:12px;color:#94a3b8">
                       Mon–Sat, 10 AM – 7 PM IST
                     </p>
                     <!-- Social / links -->
                     <p style="margin:0;font-size:11px;color:#cbd5e1">
-                      &copy; ${year} Desent Club &nbsp;·&nbsp;
+                      &copy; ${year} Disent Club &nbsp;·&nbsp;
                       <a href="${siteUrl}" style="color:#94a3b8;text-decoration:none">Visit Store</a>
                       &nbsp;·&nbsp;
                       <a href="${siteUrl}/support" style="color:#94a3b8;text-decoration:none">Support</a>

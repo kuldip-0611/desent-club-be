@@ -238,7 +238,7 @@ export class ShiprocketService implements OnModuleInit {
     const headers = await this.authHeader();
 
     // Warehouse = ship-to for a return
-    const warehouseName = this.config.get<string>('SHIPROCKET_WAREHOUSE_NAME') ?? 'Desent Club';
+    const warehouseName = this.config.get<string>('SHIPROCKET_WAREHOUSE_NAME') ?? 'Disent Club';
     const warehousePhone = this.config.get<string>('SHIPROCKET_WAREHOUSE_PHONE') ?? '9999999999';
     const warehouseAddress = this.config.get<string>('SHIPROCKET_WAREHOUSE_ADDRESS') ?? '';
     const warehouseCity = this.config.get<string>('SHIPROCKET_WAREHOUSE_CITY') ?? '';

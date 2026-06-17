@@ -122,6 +122,7 @@ model User {
   storeCredit         StoreCredit?
   referralCode        ReferralCode?
   referral            Referral?           @relation("ReferredUser")
+  purchasedGiftCards  GiftCard[]          @relation("PurchasedGiftCards")
 
   @@index([role])
 }
@@ -455,6 +456,12 @@ enum ReturnStatus {
   EXCHANGED   // exchange item dispatched to customer (only for type=EXCHANGE)
 }
 
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model Order {
   id                String      @id @default(uuid())
   userId            String
@@ -484,6 +491,9 @@ model Order {
   igst              Decimal     @default(0) @db.Decimal(10, 2)
   taxableAmount     Decimal     @default(0) @db.Decimal(10, 2)
   affiliateCode     String?     @db.VarChar(64)
+  codOtp            String?
+  codOtpVerified    Boolean     @default(false)
+  codOtpExpiresAt   DateTime?
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
   items             OrderItem[]
@@ -533,22 +543,24 @@ model ReturnRequest {
 }
 
 model ProductReview {
-  id          String   @id @default(uuid())
+  id          String       @id @default(uuid())
   userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   productId   String
-  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product     Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
   orderId     String
-  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
   orderItemId String
   rating      Int
-  comment     String?  @db.Text
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  comment     String?      @db.Text
+  status      ReviewStatus @default(PENDING)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 
   @@unique([userId, orderItemId])
   @@index([productId])
   @@index([orderId])
+  @@index([status])
 }
 
 model OrderItem {
@@ -867,6 +879,26 @@ enum StoreCreditTxType {
   USED     // credit applied at checkout
   EXPIRED  // unused credit expired
   ADJUSTED // manual admin adjustment
+}
+
+// ── Gift Cards ────────────────────────────────────────────────────────────────
+
+model GiftCard {
+  id             String    @id @default(uuid())
+  code           String    @unique @db.VarChar(20)
+  initialAmount  Decimal   @db.Decimal(10, 2)
+  balance        Decimal   @db.Decimal(10, 2)
+  purchasedById  String?
+  purchasedBy    User?     @relation("PurchasedGiftCards", fields: [purchasedById], references: [id], onDelete: SetNull)
+  recipientEmail String
+  recipientName  String?
+  isActive       Boolean   @default(true)
+  expiresAt      DateTime?
+  createdAt      DateTime  @default(now())
+  redeemedAt     DateTime?
+
+  @@index([code])
+  @@index([purchasedById])
 }
 
 // ── Cancellation Reasons (Admin-managed) ─────────────────────────────────────

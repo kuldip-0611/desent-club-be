@@ -9,10 +9,10 @@ export function buildRegistrationOtpEmail(otp: string): {
   text: string
   html: string
 } {
-  const subject = 'Verify your email - Desent Club'
+  const subject = 'Verify your email - Disent Club'
 
   const text = [
-    'Welcome to Desent Club.',
+    'Welcome to Disent Club.',
     '',
     `Your email verification code is: ${otp}`,
     '',
@@ -25,7 +25,7 @@ export function buildRegistrationOtpEmail(otp: string): {
       Verify your email 📧
     </h2>
     <p style="margin:0 0 28px;font-size:16px;color:#64748b;line-height:1.6">
-      Welcome to <strong style="color:#1e293b">Desent Club</strong>!
+      Welcome to <strong style="color:#1e293b">Disent Club</strong>!
       Use the one-time code below to complete your registration.
     </p>
 
@@ -48,11 +48,11 @@ export function buildRegistrationOtpEmail(otp: string): {
     </table>
 
     <p style="margin:0;font-size:13px;color:#94a3b8;text-align:center;line-height:1.6">
-      🔒 Never share this code with anyone. Desent Club will never ask for it.
+      🔒 Never share this code with anyone. Disent Club will never ask for it.
     </p>`
 
   const html = baseLayout({
-    preheader: `${otp} is your Desent Club verification code`,
+    preheader: `${otp} is your Disent Club verification code`,
     content,
     logoUrl: LOGO_URL,
   })

@@ -5,7 +5,7 @@
  *   NODE_ENV=production  →  AWS_ACCESS_KEY_ID_PROD  /  AWS_SECRET_ACCESS_KEY_PROD  /  AWS_S3_BUCKET_PROD
  *   everything else      →  AWS_ACCESS_KEY_ID_DEV   /  AWS_SECRET_ACCESS_KEY_DEV   /  AWS_S3_BUCKET_DEV
  *
- * Optional CDN: set AWS_S3_CDN_URL (e.g. https://cdn.desentclub.com) to serve
+ * Optional CDN: set AWS_S3_CDN_URL (e.g. https://cdn.disentclub.com) to serve
  * images through CloudFront instead of direct S3 URLs.
  */
 import { Injectable, Logger } from '@nestjs/common';
@@ -141,7 +141,7 @@ export class StorageService {
    * Extract the S3 key from a URL or return it as-is if it already looks like a key.
    * Handles:
    *   https://bucket.s3.region.amazonaws.com/products/uuid.jpg  →  products/uuid.jpg
-   *   https://cdn.desentclub.com/products/uuid.jpg               →  products/uuid.jpg
+   *   https://cdn.disentclub.com/products/uuid.jpg               →  products/uuid.jpg
    *   products/uuid.jpg                                           →  products/uuid.jpg
    */
   extractKey(urlOrKey: string): string {

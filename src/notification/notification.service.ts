@@ -231,30 +231,30 @@ export class NotificationService {
     userName: string,
     items: { name: string; quantity: number; unitPrice: number }[],
   ): Promise<void> {
-    const subject = `🛒 You left something in your cart — Desent Club`;
+    const subject = `🛒 You left something in your cart — Disent Club`;
     const itemRows = items
       .map((i) => `<li>${i.name} × ${i.quantity} — ₹${(i.unitPrice * i.quantity).toFixed(2)}</li>`)
       .join('');
     const html = `
       <p>Hi ${userName},</p>
-      <p>You left some items in your cart at <strong>Desent Club</strong>:</p>
+      <p>You left some items in your cart at <strong>Disent Club</strong>:</p>
       <ul>${itemRows}</ul>
       <p>Complete your purchase before items sell out!</p>
       <a href="${this.siteUrl}/cart" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-top:16px;">Complete Purchase →</a>
     `;
-    const text = `Hi ${userName}, you left ${items.length} item(s) in your Desent Club cart. Visit ${this.siteUrl}/cart to complete your purchase.`;
+    const text = `Hi ${userName}, you left ${items.length} item(s) in your Disent Club cart. Visit ${this.siteUrl}/cart to complete your purchase.`;
     this.send(to, subject, text, html).catch(() => undefined);
   }
 
   async sendBackInStockEmail(to: string, productName: string, productId: string): Promise<void> {
     const siteUrl = this.siteUrl;
-    const subject = `${productName} is back in stock — Desent Club`;
+    const subject = `${productName} is back in stock — Disent Club`;
     const html = `
-      <p>Great news! <strong>${productName}</strong> is back in stock at Desent Club.</p>
+      <p>Great news! <strong>${productName}</strong> is back in stock at Disent Club.</p>
       <p>Grab it before it sells out again!</p>
       <a href="${siteUrl}/products/${productId}" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-top:16px;">Shop Now →</a>
     `;
-    const text = `${productName} is back in stock at Desent Club. Visit ${siteUrl}/products/${productId} to shop now.`;
+    const text = `${productName} is back in stock at Disent Club. Visit ${siteUrl}/products/${productId} to shop now.`;
     await this.send(to, subject, text, html);
   }
 
@@ -292,13 +292,13 @@ export class NotificationService {
         const html = `
           <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto">
             <div style="background:linear-gradient(135deg,#4f46e5,#6366f1);padding:28px 32px;border-radius:12px 12px 0 0">
-              <p style="color:#fff;font-size:22px;font-weight:800;margin:0">Desent Club</p>
+              <p style="color:#fff;font-size:22px;font-weight:800;margin:0">Disent Club</p>
             </div>
             <div style="background:#fff;padding:28px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px">
               <h2 style="color:#1e293b;font-size:18px;margin:0 0 12px">${title}</h2>
               <p style="color:#475569;font-size:14px;line-height:1.7;margin:0 0 24px">${body}</p>
-              <a href="${this.siteUrl}" style="background:#4f46e5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600">Visit Desent Club →</a>
-              <p style="margin-top:24px;font-size:11px;color:#94a3b8">You received this because you have an account at Desent Club.</p>
+              <a href="${this.siteUrl}" style="background:#4f46e5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600">Visit Disent Club →</a>
+              <p style="margin-top:24px;font-size:11px;color:#94a3b8">You received this because you have an account at Disent Club.</p>
             </div>
           </div>`;
         await this.send(u.email!, title, body, html).catch(() => undefined);

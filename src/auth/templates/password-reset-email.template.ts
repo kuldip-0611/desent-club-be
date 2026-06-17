@@ -8,10 +8,10 @@ export function buildPasswordResetEmail(resetLink: string): {
   text: string
   html: string
 } {
-  const subject = 'Reset your password - Desent Club'
+  const subject = 'Reset your password - Disent Club'
 
   const text = [
-    'You requested a password reset for your Desent Club account.',
+    'You requested a password reset for your Disent Club account.',
     '',
     `Reset your password: ${resetLink}`,
     '',
@@ -25,7 +25,7 @@ export function buildPasswordResetEmail(resetLink: string): {
     </h2>
     <p style="margin:0 0 28px;font-size:16px;color:#64748b;line-height:1.6">
       We received a request to reset the password for your
-      <strong style="color:#1e293b">Desent Club</strong> account.
+      <strong style="color:#1e293b">Disent Club</strong> account.
       Click the button below to choose a new password.
     </p>
 
@@ -47,7 +47,7 @@ export function buildPasswordResetEmail(resetLink: string): {
     </p>`
 
   const html = baseLayout({
-    preheader: 'Reset your Desent Club password — link expires in 1 hour',
+    preheader: 'Reset your Disent Club password — link expires in 1 hour',
     content,
     logoUrl: LOGO_URL,
   })

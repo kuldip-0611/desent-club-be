@@ -19,7 +19,7 @@ export class MailService {
   // ── Private helpers ──────────────────────────────────────────────────────────
 
   private get from(): string {
-    return this.config.get<string>('RESEND_FROM') ?? 'Desent Club <testinfo@disentclub.com>';
+    return this.config.get<string>('RESEND_FROM') ?? 'Disent Club <testinfo@disentclub.com>';
   }
 
   private get siteUrl(): string {
@@ -106,7 +106,7 @@ export class MailService {
   }): Promise<void> {
     const ref = opts.orderId.slice(-8).toUpperCase();
     const html = buildOrderConfirmationEmail({ ...opts, siteUrl: this.siteUrl });
-    await this.send(opts.to, `Order Confirmed — #${ref} | Desent Club`, html);
+    await this.send(opts.to, `Order Confirmed — #${ref} | Disent Club`, html);
   }
 
   // ── Order Shipped ────────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ export class MailService {
   }): Promise<void> {
     const ref = opts.orderId.slice(-8).toUpperCase();
     const html = buildOrderShippedEmail({ ...opts, siteUrl: this.siteUrl });
-    await this.send(opts.to, `Your Order #${ref} has Shipped! 🚚 | Desent Club`, html);
+    await this.send(opts.to, `Your Order #${ref} has Shipped! 🚚 | Disent Club`, html);
   }
 
   // ── Order Delivered ──────────────────────────────────────────────────────────
@@ -134,7 +134,7 @@ export class MailService {
   }): Promise<void> {
     const ref = opts.orderId.slice(-8).toUpperCase();
     const html = buildOrderDeliveredEmail({ ...opts, siteUrl: this.siteUrl });
-    await this.send(opts.to, `Order Delivered — #${ref} ✅ | Desent Club`, html);
+    await this.send(opts.to, `Order Delivered — #${ref} ✅ | Disent Club`, html);
   }
 
   // ── Refund Processed ─────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ export class MailService {
   }): Promise<void> {
     const ref = opts.orderId.slice(-8).toUpperCase();
     const html = buildRefundProcessedEmail({ ...opts, siteUrl: this.siteUrl });
-    await this.send(opts.to, `Refund Processed for Order #${ref} | Desent Club`, html);
+    await this.send(opts.to, `Refund Processed for Order #${ref} | Disent Club`, html);
   }
 
   // ── Return / Exchange Approved ────────────────────────────────────────────────
@@ -168,7 +168,7 @@ export class MailService {
     const html = buildReturnApprovedEmail({ ...opts, siteUrl: this.siteUrl });
     await this.send(
       opts.to,
-      `${isExchange ? 'Exchange' : 'Return'} Approved for Order #${ref} | Desent Club`,
+      `${isExchange ? 'Exchange' : 'Return'} Approved for Order #${ref} | Disent Club`,
       html,
     );
   }
@@ -185,6 +185,6 @@ export class MailService {
   }): Promise<void> {
     const ref = opts.orderId.slice(-8).toUpperCase();
     const html = buildOrderCancelledEmail({ ...opts, siteUrl: this.siteUrl });
-    await this.send(opts.to, `Order #${ref} Cancelled | Desent Club`, html);
+    await this.send(opts.to, `Order #${ref} Cancelled | Disent Club`, html);
   }
 }

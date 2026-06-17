@@ -18,7 +18,7 @@ export function buildOrderDeliveredEmail(data: OrderDeliveredData): string {
     </h2>
     <p style="margin:0 0 28px;font-size:16px;color:#64748b;line-height:1.6">
       Hi <strong style="color:#1e293b">${data.name}</strong>, your order has been delivered.
-      We hope you love your new Desent Club pieces!
+      We hope you love your new Disent Club pieces!
     </p>
 
     ${orderBadge(data.orderId)}
@@ -63,13 +63,13 @@ export function buildOrderDeliveredEmail(data: OrderDeliveredData): string {
     </table>
 
     <p style="margin:0;font-size:13px;color:#94a3b8;text-align:center;line-height:1.6">
-      Thank you for shopping with Desent Club! 🙏<br/>
+      Thank you for shopping with Disent Club! 🙏<br/>
       We'd love to see you again soon.
     </p>`
 
   return baseLayout({
-    preheader: `Your Desent Club order #${ref} has been delivered — share your experience!`,
+    preheader: `Your Disent Club order #${ref} has been delivered — share your experience!`,
     content,
-    logoUrl: `${siteUrl}/logo.png`,
+    logoUrl: 'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
   })
 }

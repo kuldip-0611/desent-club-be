@@ -31,6 +31,8 @@ import { LoyaltyModule } from './loyalty/loyalty.module';
 import { ReferralModule } from './referral/referral.module';
 import { CancellationReasonModule } from './cancellation-reason/cancellation-reason.module';
 import { StoreCreditModule } from './store-credit/store-credit.module';
+import { GiftCardModule } from './gift-card/gift-card.module';
+import { ReviewsModule } from './reviews/reviews.module';
 
 @Module({
   imports: [
@@ -66,6 +68,8 @@ import { StoreCreditModule } from './store-credit/store-credit.module';
     BundleModule,
     CancellationReasonModule,
     StoreCreditModule,
+    GiftCardModule,
+    ReviewsModule,
   ],
   controllers: [AppController],
   providers: [

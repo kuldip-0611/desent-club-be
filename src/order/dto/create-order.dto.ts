@@ -83,4 +83,10 @@ export class CreateOrderDto {
   @IsInt()
   @Min(0)
   loyaltyPoints?: number;
+
+  /** Gift card code to apply */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  giftCardCode?: string;
 }

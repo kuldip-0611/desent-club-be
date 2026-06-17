@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, ProductAudience } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ListShopProductsQueryDto } from './dto/list-shop-products-query.dto';
@@ -234,7 +234,7 @@ export class ShopService {
     if (!row) throw new NotFoundException('Product not found');
     const product = this.toShopProduct(row);
     const reviewStats = await this.prisma.productReview.aggregate({
-      where: { productId: row.id },
+      where: { productId: row.id, status: 'APPROVED' },
       _avg: { rating: true },
       _count: { rating: true },
     });
@@ -251,7 +251,7 @@ export class ShopService {
     if (!product) throw new NotFoundException('Product not found');
 
     const skip = (page - 1) * limit;
-    const where = { productId: product.id };
+    const where = { productId: product.id, status: 'APPROVED' as const };
     const [items, total, aggregate] = await Promise.all([
       this.prisma.productReview.findMany({
         where,
@@ -596,13 +596,96 @@ export class ShopService {
     };
   }
 
+  async submitReview(
+    slug: string,
+    userId: string,
+    body: { rating: number; comment?: string; orderItemId: string },
+  ) {
+    const id = slug.includes('--') ? slug.split('--').pop() ?? '' : slug;
+    const product = await this.prisma.product.findUnique({ where: { id }, select: { id: true } });
+    if (!product) throw new NotFoundException('Product not found');
+
+    if (body.rating < 1 || body.rating > 5) {
+      throw new BadRequestException('Rating must be between 1 and 5');
+    }
+
+    // Verify order item belongs to user and order is DELIVERED
+    const orderItem = await this.prisma.orderItem.findFirst({
+      where: { id: body.orderItemId, productId: product.id, order: { userId, status: 'DELIVERED' } },
+      include: { order: { select: { id: true, status: true } } },
+    });
+    if (!orderItem) {
+      throw new BadRequestException('You can only review items from delivered orders');
+    }
+
+    const existing = await this.prisma.productReview.findUnique({
+      where: { userId_orderItemId: { userId, orderItemId: body.orderItemId } },
+    });
+    if (existing) throw new BadRequestException('You have already reviewed this item');
+
+    const review = await this.prisma.productReview.create({
+      data: {
+        userId,
+        productId: product.id,
+        orderId: orderItem.order.id,
+        orderItemId: body.orderItemId,
+        rating: body.rating,
+        comment: body.comment,
+        status: 'PENDING',
+      },
+    });
+    return { id: review.id, status: review.status };
+  }
+
+  async adminListReviews(
+    status?: 'PENDING' | 'APPROVED' | 'REJECTED',
+    page = 1,
+    limit = 20,
+  ) {
+    const where = status ? { status } : {};
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      this.prisma.productReview.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+          product: { select: { id: true, name: true, slug: true } },
+        },
+      }),
+      this.prisma.productReview.count({ where }),
+    ]);
+    return {
+      items: items.map((r) => ({
+        id: r.id,
+        rating: r.rating,
+        comment: r.comment,
+        status: r.status,
+        createdAt: r.createdAt,
+        user: r.user,
+        product: r.product,
+      })),
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  async adminUpdateReview(id: string, status: 'APPROVED' | 'REJECTED') {
+    const review = await this.prisma.productReview.findUnique({ where: { id } });
+    if (!review) throw new NotFoundException('Review not found');
+    return this.prisma.productReview.update({ where: { id }, data: { status } });
+  }
+
   private async attachReviewStats<T extends { id: string; rating: number; reviewsCount: number }>(
     products: T[],
   ): Promise<T[]> {
     if (!products.length) return products;
     const stats = await this.prisma.productReview.groupBy({
       by: ['productId'],
-      where: { productId: { in: products.map((p) => p.id) } },
+      where: { productId: { in: products.map((p) => p.id) }, status: 'APPROVED' },
       _avg: { rating: true },
       _count: { rating: true },
     });

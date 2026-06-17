@@ -89,13 +89,13 @@ export function buildRefundProcessedEmail(data: RefundProcessedData): string {
 
     <p style="margin:0;font-size:13px;color:#94a3b8;text-align:center;line-height:1.6">
       Questions about your refund? Email us at
-      <a href="mailto:support@desentclub.com" style="color:#6366f1;text-decoration:none">support@desentclub.com</a>
+      <a href="mailto:support@disentclub.com" style="color:#6366f1;text-decoration:none">support@disentclub.com</a>
       with your order reference <strong>#${ref}</strong>.
     </p>`
 
   return baseLayout({
     preheader: `Refund of ₹${data.amount.toFixed(2)} initiated for order #${ref}`,
     content,
-    logoUrl: `${siteUrl}/logo.png`,
+    logoUrl: 'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
   })
 }

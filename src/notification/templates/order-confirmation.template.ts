@@ -37,7 +37,7 @@ export function buildOrderConfirmationEmail(payload: OrderConfirmationPayload): 
   const shortId = orderId.slice(-8).toUpperCase()
   const greeting = userName ? `Hi ${userName},` : 'Hello,'
 
-  const subject = `Order Confirmed! #${shortId} — Desent Club`
+  const subject = `Order Confirmed! #${shortId} — Disent Club`
 
   // ── plain text ──────────────────────────────────────────────────────────────
   const itemLines = items
@@ -59,7 +59,7 @@ export function buildOrderConfirmationEmail(payload: OrderConfirmationPayload): 
   const text = [
     greeting,
     '',
-    `Your order #${shortId} has been confirmed. Thank you for shopping with Desent Club!`,
+    `Your order #${shortId} has been confirmed. Thank you for shopping with Disent Club!`,
     '',
     'ITEMS ORDERED',
     itemLines,
@@ -71,7 +71,7 @@ export function buildOrderConfirmationEmail(payload: OrderConfirmationPayload): 
     `Shipping to: ${addressLine}`,
     '',
     'We will notify you when your order ships.',
-    '— Desent Club Team',
+    '— Disent Club Team',
   ].join('\n')
 
   // ── HTML ────────────────────────────────────────────────────────────────────
@@ -138,7 +138,7 @@ export function buildOrderConfirmationEmail(payload: OrderConfirmationPayload): 
           <!-- Header -->
           <tr>
             <td style="padding:28px 32px 20px 32px;background-color:#111827;">
-              <p style="margin:0;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;">Desent Club</p>
+              <p style="margin:0;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;">Disent Club</p>
               <h1 style="margin:10px 0 0 0;font-size:24px;font-weight:700;color:#ffffff;">Order Confirmed! ✅</h1>
               <p style="margin:10px 0 0 0;font-size:14px;color:#d1d5db;line-height:1.6;">
                 ${greeting.replace(/</g, '&lt;')} Your order has been placed and is being prepared.
@@ -196,7 +196,7 @@ export function buildOrderConfirmationEmail(payload: OrderConfirmationPayload): 
               <p style="margin:0;font-size:13px;line-height:1.7;color:#4b5563;">
                 We'll send you another email when your order ships with tracking details. If you have any questions, reply to this email.
               </p>
-              <p style="margin:20px 0 0 0;font-size:12px;color:#9ca3af;">— Desent Club Team</p>
+              <p style="margin:20px 0 0 0;font-size:12px;color:#9ca3af;">— Disent Club Team</p>
             </td>
           </tr>
 

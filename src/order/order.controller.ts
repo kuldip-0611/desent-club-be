@@ -210,6 +210,16 @@ export class OrderController {
     return this.orderService.submitReviews(req.user.sub, id, dto);
   }
 
+  @Post('orders/my/:id/verify-cod')
+  @ApiOperation({ summary: 'Verify COD OTP' })
+  verifyCodOtp(
+    @Request() req: { user: { sub: string } },
+    @Param('id') id: string,
+    @Body('otp') otp: string,
+  ) {
+    return this.orderService.verifyCodOtp(req.user.sub, id, otp);
+  }
+
   @Post('orders/my/:id/nps')
   @ApiOperation({ summary: 'Submit NPS survey for a delivered order' })
   submitNps(

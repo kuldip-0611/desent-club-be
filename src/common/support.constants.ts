@@ -1,4 +1,4 @@
-export const DEFAULT_SUPPORT_EMAIL = 'support@desentclub.com'
+export const DEFAULT_SUPPORT_EMAIL = 'support@disentclub.com'
 export const DEFAULT_SUPPORT_PHONE = '919313597171'
 export const DEFAULT_SUPPORT_PHONE_DISPLAY = '+91 93135 97171'
 

@@ -25,7 +25,7 @@ async function bootstrap() {
     }),
   );
   const swaggerConfig = new DocumentBuilder()
-    .setTitle('Desent Club Backend API')
+    .setTitle('Disent Club Backend API')
     .setDescription('Authentication and eCommerce backend APIs')
     .setVersion('1.0.0')
     .addBearerAuth()

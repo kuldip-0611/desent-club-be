@@ -9,7 +9,7 @@ export class SettingsController {
   @ApiOperation({ summary: 'Basic public app/upload settings' })
   getBasicSettings() {
     return {
-      appName: 'Desent Club',
+      appName: 'Disent Club',
       uploads: UPLOAD_SETTINGS_RESPONSE,
     };
   }

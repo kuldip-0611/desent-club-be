@@ -34,14 +34,14 @@ export function buildNewCouponEmail(coupon: {
   const detailLines = [minNote, maxNote, expiryNote].filter(Boolean).join('\n');
 
   const text = [
-    'Great news! A new coupon is now available on Desent Club.',
+    'Great news! A new coupon is now available on Disent Club.',
     '',
     `Use code: ${coupon.code}`,
     `Discount: ${discountLabel}`,
     ...(detailLines ? [detailLines] : []),
     '',
     'Shop now and save!',
-    '— Desent Club Team',
+    '— Disent Club Team',
   ].join('\n');
 
   const detailHtml = [minNote, maxNote, expiryNote]
@@ -66,7 +66,7 @@ export function buildNewCouponEmail(coupon: {
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;background-color:#ffffff;border-radius:12px;border:1px solid #e5e7eb;overflow:hidden;">
           <tr>
             <td style="padding:28px 28px 8px 28px;background-color:#111827;">
-              <p style="margin:0;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;">Desent Club</p>
+              <p style="margin:0;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;">Disent Club</p>
               <h1 style="margin:12px 0 0 0;font-size:22px;font-weight:700;line-height:1.3;color:#ffffff;">New Coupon Just Dropped!</h1>
               <p style="margin:14px 0 0 0;font-size:14px;line-height:1.6;color:#d1d5db;">
                 Use this exclusive code and save on your next order.
@@ -151,7 +151,7 @@ export function buildGroupCouponEmail(
     ...(detailLines ? [detailLines] : []),
     '',
     'Shop now and enjoy your exclusive discount!',
-    '— Desent Club Team',
+    '— Disent Club Team',
   ].join('\n');
 
   const detailHtml = [minNote, maxNote, expiryNote]
@@ -176,7 +176,7 @@ export function buildGroupCouponEmail(
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;background-color:#ffffff;border-radius:12px;border:1px solid #e5e7eb;overflow:hidden;">
           <tr>
             <td style="padding:28px 28px 8px 28px;background-color:#111827;">
-              <p style="margin:0;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;">Desent Club</p>
+              <p style="margin:0;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;">Disent Club</p>
               <h1 style="margin:12px 0 0 0;font-size:22px;font-weight:700;line-height:1.3;color:#ffffff;">Your Exclusive Coupon is Here!</h1>
               <p style="margin:14px 0 0 0;font-size:14px;line-height:1.6;color:#d1d5db;">
                 ${greeting.replace('<', '&lt;')} This coupon is specially unlocked for <strong style="color:#ffffff;">${groupName}</strong> members.
@@ -252,14 +252,14 @@ export function buildDirectCouponEmail(
   const text = [
     greeting,
     '',
-    'A coupon has been added to your Desent Club account.',
+    'A coupon has been added to your Disent Club account.',
     '',
     `Use code: ${coupon.code}`,
     `Discount: ${discountLabel}`,
     ...(detailLines ? [detailLines] : []),
     '',
     'Apply it at checkout on your next order!',
-    '— Desent Club Team',
+    '— Disent Club Team',
   ].join('\n');
 
   const detailHtml = [minNote, maxNote, expiryNote]
@@ -284,7 +284,7 @@ export function buildDirectCouponEmail(
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;background-color:#ffffff;border-radius:12px;border:1px solid #e5e7eb;overflow:hidden;">
           <tr>
             <td style="padding:28px 28px 8px 28px;background-color:#111827;">
-              <p style="margin:0;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;">Desent Club</p>
+              <p style="margin:0;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;">Disent Club</p>
               <h1 style="margin:12px 0 0 0;font-size:22px;font-weight:700;line-height:1.3;color:#ffffff;">You Have a New Coupon!</h1>
               <p style="margin:14px 0 0 0;font-size:14px;line-height:1.6;color:#d1d5db;">
                 ${greeting.replace('<', '&lt;')} A coupon has been personally added to your account.
