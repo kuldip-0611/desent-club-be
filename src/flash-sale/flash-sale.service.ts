@@ -210,6 +210,7 @@ export class FlashSaleService {
 
   async create(dto: CreateFlashSaleDto) {
     await this.assertProductsExist(dto.productIds);
+    await this.assertNoProductOverlap(dto.productIds, undefined);
     return this.prisma.flashSale.create({
       data: {
         title: dto.title,
@@ -226,6 +227,7 @@ export class FlashSaleService {
     await this.ensureExists(id);
     if (dto.productIds !== undefined) {
       await this.assertProductsExist(dto.productIds);
+      await this.assertNoProductOverlap(dto.productIds, id);
     }
     return this.prisma.flashSale.update({
       where: { id },
@@ -261,6 +263,31 @@ export class FlashSaleService {
       throw new BadRequestException(
         'One or more product IDs in the flash sale do not exist.',
       );
+    }
+  }
+
+  private async assertNoProductOverlap(productIds: string[], excludeSaleId: string | undefined): Promise<void> {
+    if (!productIds || productIds.length === 0) return;
+    const unique = [...new Set(productIds)];
+    const now = new Date();
+    // Find other active/upcoming sales that contain any of these product IDs
+    const otherSales = await this.prisma.flashSale.findMany({
+      where: {
+        isActive: true,
+        endsAt: { gte: now },
+        ...(excludeSaleId ? { id: { not: excludeSaleId } } : {}),
+      },
+      select: { id: true, title: true, productIds: true },
+    });
+    for (const sale of otherSales) {
+      const existingIds = (sale.productIds as string[]) ?? [];
+      if (existingIds.length === 0) continue; // "ALL" scope — handled below
+      const overlap = unique.filter((id) => existingIds.includes(id));
+      if (overlap.length > 0) {
+        throw new BadRequestException(
+          `${overlap.length} product(s) are already in another active flash sale "${sale.title}". Remove duplicates before saving.`,
+        );
+      }
     }
   }
 }

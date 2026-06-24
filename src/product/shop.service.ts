@@ -108,7 +108,7 @@ export class ShopService {
           category: { select: { id: true, slug: true, name: true } },
           subcategory: { select: { slug: true, name: true } },
           images: { orderBy: { sortOrder: 'asc' } },
-          variants: true,
+          variants: { include: { catalogSize: { select: { sortOrder: true } } } },
           productFabrics: { include: { fabric: { select: { name: true } } } },
         },
       });
@@ -218,7 +218,7 @@ export class ShopService {
           category: { select: { id: true, slug: true, name: true } },
           subcategory: { select: { slug: true, name: true } },
           images: { orderBy: { sortOrder: 'asc' } },
-          variants: true,
+          variants: { include: { catalogSize: { select: { sortOrder: true } } } },
           productFabrics: { include: { fabric: { select: { name: true } } } },
         },
         orderBy,
@@ -256,7 +256,7 @@ export class ShopService {
         category: { select: { id: true, slug: true, name: true } },
         subcategory: { select: { slug: true, name: true } },
         images: { orderBy: { sortOrder: 'asc' } },
-        variants: true,
+        variants: { include: { catalogSize: { select: { sortOrder: true } } } },
         productFabrics: { include: { fabric: { select: { name: true } } } },
       },
     });
@@ -329,7 +329,7 @@ export class ShopService {
         category: { select: { id: true, slug: true, name: true } },
         subcategory: { select: { slug: true, name: true } },
         images: { orderBy: { sortOrder: 'asc' } },
-        variants: true,
+        variants: { include: { catalogSize: { select: { sortOrder: true } } } },
       },
       orderBy: { createdAt: 'desc' },
       take: 4,
@@ -453,7 +453,7 @@ export class ShopService {
     category: { id: string; slug: string; name: string } | null;
     subcategory: { slug: string; name: string } | null;
     images: { path: string; color: string }[];
-    variants: { id: string; size: string; color: string; quantity: number }[];
+    variants: { id: string; size: string; color: string; quantity: number; catalogSize?: { sortOrder: number } | null }[];
     productFabrics?: { fabric: { name: string }; percent?: number | null }[];
     createdAt: Date;
   }) {
@@ -476,7 +476,12 @@ export class ShopService {
       },
       {} as Record<string, string[]>,
     );
-    const variants: ShopVariant[] = row.variants.map((variant) => {
+    const sortedVariants = [...row.variants].sort((a, b) => {
+      const aOrder = a.catalogSize?.sortOrder ?? 9999;
+      const bOrder = b.catalogSize?.sortOrder ?? 9999;
+      return aOrder !== bOrder ? aOrder - bOrder : a.size.localeCompare(b.size);
+    });
+    const variants: ShopVariant[] = sortedVariants.map((variant) => {
       const colorName = String(variant.color ?? '').trim() || 'Default';
       return {
         id: variant.id,

@@ -27,8 +27,11 @@ export class SettingsController {
     return {
       defaultGstRate: all.defaultGstRate,
       freeShippingThreshold: all.freeShippingThreshold,
+      shippingFee: all.shippingFee,
       currency: all.currency,
       storeName: all.storeName,
+      supportEmail: all.supportEmail,
+      supportPhone: all.supportPhone,
     };
   }
 

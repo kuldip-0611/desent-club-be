@@ -16,7 +16,8 @@ const DEFAULTS: Record<string, string> = {
   supportEmail: '',
   supportPhone: '',
   currency: 'INR',
-  freeShippingThreshold: '0',
+  freeShippingThreshold: '999',
+  shippingFee: '99',
 };
 
 @Injectable()
