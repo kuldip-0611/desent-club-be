@@ -156,12 +156,32 @@ export class ShiprocketService implements OnModuleInit {
 
   // ─── Assign AWB (auto-assign best courier) ───────────────────────────────────
 
-  async assignAWB(shipmentId: string): Promise<{
+  async assignAWB(shipmentId: string, pickupPincode?: string, deliveryPincode?: string, isCod = false): Promise<{
     awbCode: string;
     courierName: string;
     trackingUrl: string;
   }> {
     const headers = await this.authHeader();
+
+    // Step 1: get recommended courier ID via serviceability
+    let courierId: number | undefined;
+    if (pickupPincode && deliveryPincode) {
+      try {
+        const { data: svc } = await this.http.get<{
+          data?: { shiprocket_recommended_courier_id?: number };
+        }>(
+          `/courier/serviceability/?pickup_postcode=${pickupPincode}&delivery_postcode=${deliveryPincode}&weight=0.5&cod=${isCod ? 1 : 0}`,
+          { headers },
+        );
+        courierId = svc?.data?.shiprocket_recommended_courier_id ?? undefined;
+      } catch {
+        // fall through — assign without courier_id
+      }
+    }
+
+    // Step 2: assign AWB (with courier_id if we got one)
+    const body: Record<string, unknown> = { shipment_id: shipmentId };
+    if (courierId) body['courier_id'] = courierId;
 
     const { data } = await this.http.post<{
       awb_assign_status: number;
@@ -174,7 +194,7 @@ export class ShiprocketService implements OnModuleInit {
       };
     }>(
       '/courier/assign/awb',
-      { shipment_id: shipmentId },
+      body,
       { headers },
     );
 

@@ -211,7 +211,13 @@ export class ProductService {
         ? { quantity: { gt: 5 } }
         : {};
 
-    const where: Prisma.ProductWhereInput = { AND: [searchWhere, stockWhere] };
+    const categoryWhere: Prisma.ProductWhereInput = query.categoryId
+      ? { categoryId: query.categoryId }
+      : query.subcategoryId
+      ? { subcategoryId: query.subcategoryId }
+      : {};
+
+    const where: Prisma.ProductWhereInput = { AND: [searchWhere, stockWhere, categoryWhere] };
 
     const [rows, total, available, lowStock] = await this.prisma.$transaction([
       this.prisma.product.findMany({
@@ -321,6 +327,7 @@ export class ProductService {
           color: this.resolveColorInput(dto),
           fabric: '',
           discountPercent: dto.discountPercent ?? null,
+          gstRate: dto.gstRate !== undefined ? new Prisma.Decimal(dto.gstRate) : new Prisma.Decimal(0.05),
           categoryId: categoryIdNormalized,
           subcategoryId: subcategoryIdForCreate,
           isAvailable: dto.isAvailable,
@@ -405,6 +412,9 @@ export class ProductService {
     }
     if (dto.discountPercent !== undefined) {
       data.discountPercent = dto.discountPercent;
+    }
+    if (dto.gstRate !== undefined) {
+      data.gstRate = new Prisma.Decimal(dto.gstRate);
     }
 
     let resolvedCategoryId = beforeCats.categoryId ?? null;

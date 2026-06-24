@@ -445,6 +445,7 @@ enum ReturnType {
 enum ReturnRefundMethod {
   BANK         // refund to original payment method (5-7 days)
   STORE_CREDIT // instant store credit added to account
+  UPI          // manual UPI transfer (used for COD orders)
 }
 
 enum ReturnStatus {
@@ -515,11 +516,16 @@ model ReturnRequest {
   reason       String             @db.Text
   type         ReturnType         @default(RETURN)
   refundMethod ReturnRefundMethod @default(BANK)
+  upiId        String?            @db.VarChar(100) // customer UPI ID for COD refunds
   orderItemId  String?
   exchangeSize String?            @db.VarChar(64)
   status       ReturnStatus       @default(REQUESTED)
   refundAmount Decimal?           @db.Decimal(10, 2)
   adminNote    String?            @db.Text
+
+  // Admin marks UPI refund as paid
+  refundPaidAt       DateTime?
+  refundTransactionRef String?    @db.VarChar(200)
 
   // Shiprocket reverse pickup (created when admin approves)
   returnShiprocketOrderId String? @db.VarChar(64)
@@ -914,5 +920,13 @@ model CancellationReason {
   isActive  Boolean  @default(true)
   sortOrder Int      @default(0)
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ── Store Settings (global key-value config) ──────────────────────────────────
+
+model StoreSetting {
+  key       String   @id @db.VarChar(100)
+  value     String   @db.Text
   updatedAt DateTime @updatedAt
 }

@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 export interface CreateFlashSaleDto {
@@ -8,6 +9,9 @@ export interface CreateFlashSaleDto {
   endsAt: string;
   isActive?: boolean;
   productIds: string[];
+  categoryIds?: string[];
+  subcategoryIds?: string[];
+  scope?: 'ALL' | 'CATEGORY' | 'SUBCATEGORY' | 'PRODUCTS';
 }
 
 export type UpdateFlashSaleDto = Partial<CreateFlashSaleDto>;
@@ -34,6 +38,170 @@ export class FlashSaleService {
       },
       orderBy: { startsAt: 'desc' },
     });
+  }
+
+  async getFlashSaleProductsById(saleId: string, page = 1, limit = 24) {
+    const sale = await this.prisma.flashSale.findUnique({ where: { id: saleId } });
+    if (!sale) return null;
+    const productIds: string[] = (sale.productIds as string[]) ?? [];
+    const skip = (page - 1) * limit;
+    const where: Prisma.ProductWhereInput = {
+      isAvailable: true,
+      ...(productIds.length > 0 ? { id: { in: productIds } } : {}),
+    };
+    const [rows, total] = await Promise.all([
+      this.prisma.product.findMany({
+        where, skip, take: limit, orderBy: { createdAt: 'desc' },
+        include: {
+          category: { select: { id: true, slug: true, name: true } },
+          subcategory: { select: { id: true, slug: true, name: true } },
+          images: { orderBy: { sortOrder: 'asc' }, take: 1 },
+        },
+      }),
+      this.prisma.product.count({ where }),
+    ]);
+    const discountPct = Number(sale.discountPercent);
+    const items = rows.map((p) => {
+      const mrp = Number(p.price);
+      const existingDiscount = p.discountPercent ? Number(p.discountPercent) : 0;
+      const effectiveDiscount = Math.max(existingDiscount, discountPct);
+      const salePrice = Math.round(mrp * (100 - effectiveDiscount)) / 100;
+      return {
+        id: p.id, name: p.name,
+        slug: (p as unknown as Record<string, unknown>)['slug'] ?? p.id,
+        mrp, salePrice, discountPercent: effectiveDiscount,
+        category: p.category, subcategory: p.subcategory,
+        image: p.images[0]?.path ?? null,
+        gstRate: p.gstRate !== undefined ? Number(p.gstRate) : 0.18,
+      };
+    });
+    return {
+      sale: { id: sale.id, title: sale.title, discountPercent: discountPct, endsAt: sale.endsAt, isActive: sale.isActive },
+      items, total, page, limit, hasNextPage: skip + limit < total,
+    };
+  }
+
+  async getFlashSaleProducts(page = 1, limit = 24) {
+    const now = new Date();
+    const sale = await this.prisma.flashSale.findFirst({
+      where: { isActive: true, startsAt: { lte: now }, endsAt: { gte: now } },
+      orderBy: { startsAt: 'desc' },
+    });
+    if (!sale) return { sale: null, items: [], total: 0, page, limit, hasNextPage: false };
+
+    const productIds: string[] = (sale.productIds as string[]) ?? [];
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.ProductWhereInput = {
+      isAvailable: true,
+      ...(productIds.length > 0 ? { id: { in: productIds } } : {}),
+    };
+
+    const [rows, total] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          category: { select: { id: true, slug: true, name: true } },
+          subcategory: { select: { id: true, slug: true, name: true } },
+          images: { orderBy: { sortOrder: 'asc' }, take: 1 },
+        },
+      }),
+      this.prisma.product.count({ where }),
+    ]);
+
+    const discountPct = Number(sale.discountPercent);
+
+    const items = rows.map((p) => {
+      const mrp = Number(p.price);
+      // use existing discountPercent if higher, otherwise apply flash sale discount
+      const existingDiscount = p.discountPercent ? Number(p.discountPercent) : 0;
+      const effectiveDiscount = Math.max(existingDiscount, discountPct);
+      const salePrice = Math.round(mrp * (100 - effectiveDiscount)) / 100;
+      return {
+        id: p.id,
+        name: p.name,
+        slug: (p as unknown as Record<string, unknown>)['slug'] ?? p.id,
+        mrp,
+        salePrice,
+        discountPercent: effectiveDiscount,
+        category: p.category,
+        subcategory: p.subcategory,
+        image: p.images[0]?.path ?? null,
+        gstRate: p.gstRate !== undefined ? Number(p.gstRate) : 0.18,
+      };
+    });
+
+    return {
+      sale: {
+        id: sale.id,
+        title: sale.title,
+        discountPercent: discountPct,
+        endsAt: sale.endsAt,
+      },
+      items,
+      total,
+      page,
+      limit,
+      hasNextPage: skip + limit < total,
+    };
+  }
+
+  async getAllActiveSalesWithProducts() {
+    const now = new Date();
+    const sales = await this.prisma.flashSale.findMany({
+      where: { isActive: true, startsAt: { lte: now }, endsAt: { gte: now } },
+      orderBy: { endsAt: 'asc' },
+    });
+    if (sales.length === 0) return [];
+
+    return Promise.all(
+      sales.map(async (sale) => {
+        const productIds: string[] = (sale.productIds as string[]) ?? [];
+        const where: Prisma.ProductWhereInput = {
+          isAvailable: true,
+          ...(productIds.length > 0 ? { id: { in: productIds } } : {}),
+        };
+        const rows = await this.prisma.product.findMany({
+          where,
+          take: 24,
+          orderBy: { createdAt: 'desc' },
+          include: {
+            category: { select: { id: true, slug: true, name: true } },
+            subcategory: { select: { id: true, slug: true, name: true } },
+            images: { orderBy: { sortOrder: 'asc' }, take: 1 },
+          },
+        });
+        const total = await this.prisma.product.count({ where });
+        const discountPct = Number(sale.discountPercent);
+        const items = rows.map((p) => {
+          const mrp = Number(p.price);
+          const existingDiscount = p.discountPercent ? Number(p.discountPercent) : 0;
+          const effectiveDiscount = Math.max(existingDiscount, discountPct);
+          const salePrice = Math.round(mrp * (100 - effectiveDiscount)) / 100;
+          return {
+            id: p.id,
+            name: p.name,
+            slug: (p as unknown as Record<string, unknown>)['slug'] ?? p.id,
+            mrp,
+            salePrice,
+            discountPercent: effectiveDiscount,
+            category: p.category,
+            subcategory: p.subcategory,
+            image: p.images[0]?.path ?? null,
+            gstRate: p.gstRate !== undefined ? Number(p.gstRate) : 0.18,
+          };
+        });
+        return {
+          sale: { id: sale.id, title: sale.title, discountPercent: discountPct, endsAt: sale.endsAt },
+          items,
+          total,
+          hasMore: total > 24,
+        };
+      }),
+    );
   }
 
   async listAll() {

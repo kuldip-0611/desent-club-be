@@ -357,16 +357,15 @@ export class ShopService {
     });
 
     return rows.map((row) => {
-      const basePrice = Number(row.price);
-      const compareAtPrice =
-        row.discountPercent && row.discountPercent >= 1
-          ? Math.round((basePrice * 100) / (100 - row.discountPercent))
-          : undefined;
+      const mrp = Number(row.price);
+      const discountPct = row.discountPercent && row.discountPercent >= 1 ? row.discountPercent : null;
+      const salePrice = discountPct ? Math.round(mrp * (100 - discountPct)) / 100 : mrp;
+      const compareAtPrice = discountPct ? mrp : undefined;
       return {
         id: row.id,
         slug: `${slugify(row.name)}--${row.id}`,
         name: row.name,
-        price: basePrice,
+        price: salePrice,
         compareAtPrice,
         image: row.images[0]?.path ?? null,
         category: row.category
@@ -441,6 +440,7 @@ export class ShopService {
     description: string | null;
     price: unknown;
     discountPercent: number | null;
+    gstRate?: unknown;
     audience: 'MEN' | 'WOMEN' | 'UNISEX';
     category: { id: string; slug: string; name: string } | null;
     subcategory: { slug: string; name: string } | null;
@@ -449,11 +449,13 @@ export class ShopService {
     productFabrics?: { fabric: { name: string }; percent?: number | null }[];
     createdAt: Date;
   }) {
-    const basePrice = Number(row.price);
-    const compareAtPrice =
-      row.discountPercent && row.discountPercent >= 1
-        ? Math.round((basePrice * 100) / (100 - row.discountPercent))
-        : undefined;
+    const mrp = Number(row.price);
+    // price in DB = MRP (list price). salePrice = MRP after discount.
+    const discountPct = row.discountPercent && row.discountPercent >= 1 ? row.discountPercent : null;
+    const salePrice = discountPct ? Math.round(mrp * (100 - discountPct)) / 100 : mrp;
+    const compareAtPrice = discountPct ? mrp : undefined;
+    const basePrice = salePrice; // kept for compatibility — user panel shows this as the selling price
+    const gstRate = row.gstRate !== undefined ? Number(row.gstRate) : 0.18;
     const productSlug = `${slugify(row.name)}--${row.id}`;
     const images = row.images.map((image) => image.path);
     const imagesByColor = row.images.reduce(
@@ -498,7 +500,9 @@ export class ShopService {
         : null,
       audience: row.audience,
       price: basePrice,
+      mrp: mrp,
       compareAtPrice,
+      gstRate,
       rating: 0,
       reviewsCount: 0,
       tags: ['premium', 'live-catalog'],

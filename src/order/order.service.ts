@@ -1124,13 +1124,16 @@ export class OrderService {
       }
     }
 
+    const effectiveRefundMethod = returnType === 'EXCHANGE' ? 'BANK' : (dto.refundMethod ?? 'BANK');
+
     const returnRequest = await this.prisma.returnRequest.create({
       data: {
         orderId,
         userId,
         reason: dto.reason.trim(),
         type: returnType,
-        refundMethod: returnType === 'EXCHANGE' ? 'BANK' : (dto.refundMethod ?? 'BANK'),
+        refundMethod: effectiveRefundMethod,
+        upiId: effectiveRefundMethod === 'UPI' ? (dto.upiId?.trim() ?? null) : null,
         orderItemId: returnType === 'EXCHANGE' ? dto.orderItemId : null,
         exchangeSize: returnType === 'EXCHANGE' ? dto.exchangeSize!.trim() : null,
         status: ReturnStatus.REQUESTED,
@@ -1138,12 +1141,15 @@ export class OrderService {
     });
 
     const isStoreCredit = returnType === 'RETURN' && dto.refundMethod === 'STORE_CREDIT';
+    const isUpi = returnType === 'RETURN' && dto.refundMethod === 'UPI';
     const message =
       returnType === 'EXCHANGE'
         ? `Size exchange request submitted — you requested size ${dto.exchangeSize}`
         : isStoreCredit
           ? 'Return request submitted — store credit will be added instantly once approved'
-          : 'Return request submitted — refund will be processed to your original payment method';
+          : isUpi
+            ? `Return request submitted — refund of ₹ will be sent to UPI: ${dto.upiId} once approved`
+            : 'Return request submitted — refund will be processed to your original payment method';
 
     return { message, returnId: returnRequest.id };
   }
@@ -1428,8 +1434,9 @@ export class OrderService {
       // Restore stock atomically within the existing transaction
       for (const item of returnedItems) {
         if (item.variantId) {
+          // Use updateMany so it silently skips if the variant was deleted
           updates.push(
-            this.prisma.productVariant.update({
+            this.prisma.productVariant.updateMany({
               where: { id: item.variantId },
               data: { quantity: { increment: item.quantity } },
             }),
@@ -1461,6 +1468,11 @@ export class OrderService {
           );
         }
         refundInfo = { processed: true, mode: 'store_credit', amount: refundAmt * 100 };
+      } else if (returnRequest.refundMethod === 'UPI') {
+        // UPI (COD) path — admin manually transfers; mark order refunded but don't hit Razorpay
+        const refundAmt = payment ? Number(payment.amount) : 0;
+        refundInfo = { processed: true, mode: 'none' as const, amount: refundAmt * 100 };
+        // Admin will separately call markRefundPaid to set refundPaidAt + transactionRef
       } else {
         // Bank refund path — Razorpay
         if (payment) {
@@ -1502,6 +1514,11 @@ export class OrderService {
           { returnId, orderId: returnRequest.orderId },
         )
         .catch(() => undefined);
+
+      // Reverse loyalty points earned on this order (customer returned the item)
+      this.loyalty.reverseOrderPoints(returnRequest.userId, returnRequest.orderId).catch((err: Error) =>
+        console.error(`[Loyalty] Failed to reverse points for return on order ${returnRequest.orderId}:`, err?.message),
+      );
 
       if (returnRequest.order.user.email && refundInfo?.amount) {
         if (useStoreCredit) {
@@ -1788,8 +1805,8 @@ export class OrderService {
       canReturn = new Date() <= windowEnd;
     }
 
-    const preShipment = [OrderStatus.PENDING, OrderStatus.CONFIRMED].includes(order.status as OrderStatus);
-    const hasSizedItems = order.items.some((i) => !!i.size);
+    const preShipment = (['PENDING', 'CONFIRMED'] as string[]).includes(order.status as string);
+    const hasSizedItems = order.items.some((i) => !!(i as { id: string; size?: string | null }).size);
 
     return {
       ...order,
@@ -2020,15 +2037,20 @@ export class OrderService {
     // Retrieve the stored shipment id
     const dbOrder = await this.prisma.order.findUnique({
       where: { id: orderId },
-      select: { trackingUrl: true },
+      select: { trackingUrl: true, shippingAddress: true, payment: { select: { method: true } } },
     });
 
     const shipmentId = dbOrder?.trackingUrl?.startsWith('sr_shipment:')
       ? dbOrder.trackingUrl.replace('sr_shipment:', '')
-      : shiprocketOrderId; // fallback
+      : shiprocketOrderId;
+
+    const addr = (dbOrder?.shippingAddress ?? {}) as Record<string, string>;
+    const deliveryPincode = addr['pincode'] ?? '';
+    const pickupPincode = '382210';
+    const isCod = dbOrder?.payment?.method === 'COD';
 
     const { awbCode, courierName, trackingUrl } =
-      await this.shiprocket.assignAWB(shipmentId);
+      await this.shiprocket.assignAWB(shipmentId, pickupPincode, deliveryPincode, isCod);
 
     await this.prisma.order.update({
       where: { id: orderId },
@@ -2041,6 +2063,53 @@ export class OrderService {
   }
 
   /** Admin manually marks a COD order as remitted */
+  async markUpiRefundPaid(
+    returnId: string,
+    transactionRef?: string,
+    note?: string,
+  ): Promise<{ message: string }> {
+    const ret = await this.prisma.returnRequest.findUnique({
+      where: { id: returnId },
+      include: {
+        order: { include: { user: { select: { id: true, name: true, fcmToken: true } }, payment: true } },
+      },
+    });
+    if (!ret) throw new NotFoundException('Return request not found');
+    if (ret.refundMethod !== 'UPI') throw new BadRequestException('This return is not a UPI refund');
+    if (ret.refundPaidAt) throw new BadRequestException('Refund already marked as paid');
+
+    await this.prisma.returnRequest.update({
+      where: { id: returnId },
+      data: {
+        refundPaidAt: new Date(),
+        refundTransactionRef: transactionRef?.trim() ?? null,
+        adminNote: note?.trim() ?? ret.adminNote,
+        status: ReturnStatus.REFUNDED,
+      },
+    });
+
+    // Update order status too
+    await this.prisma.order.update({
+      where: { id: ret.orderId },
+      data: { status: OrderStatus.REFUNDED },
+    });
+
+    const amount = ret.order.payment ? Number(ret.order.payment.amount) : 0;
+
+    this.notification
+      .persistAndPush(
+        ret.userId,
+        'UPI Refund Sent 💰',
+        `₹${amount.toFixed(2)} has been sent to your UPI (${ret.upiId}). Ref: ${transactionRef ?? 'N/A'}`,
+        'order',
+        ret.order.user.fcmToken ?? undefined,
+        { returnId, orderId: ret.orderId },
+      )
+      .catch(() => undefined);
+
+    return { message: `UPI refund marked as paid. Ref: ${transactionRef ?? '—'}` };
+  }
+
   async markCodRemitted(orderId: string, remittanceRef?: string): Promise<{ message: string }> {
     const payment = await this.prisma.payment.findFirst({
       where: { orderId, method: PaymentMethod.COD },

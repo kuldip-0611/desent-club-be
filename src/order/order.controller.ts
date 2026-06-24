@@ -29,6 +29,7 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { CreateReviewsDto } from './dto/create-reviews.dto';
 import { UpdateReturnStatusDto } from './dto/update-return-status.dto';
+import { MarkRefundPaidDto } from './dto/mark-refund-paid.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import type { RazorpayWebhookEvent } from './dto/razorpay-webhook.dto';
 import { OrderService } from './order.service';
@@ -310,6 +311,14 @@ export class OrderController {
   @ApiOperation({ summary: '[Admin] Update return request status' })
   updateReturn(@Param('id') id: string, @Body() dto: UpdateReturnStatusDto) {
     return this.orderService.updateReturnStatus(id, dto);
+  }
+
+  @Post('admin/returns/:id/mark-refund-paid')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @ApiOperation({ summary: '[Admin] Mark UPI refund as paid (COD returns)' })
+  markUpiRefundPaid(@Param('id') id: string, @Body() dto: MarkRefundPaidDto) {
+    return this.orderService.markUpiRefundPaid(id, dto.transactionRef, dto.note);
   }
 
   @Patch('admin/orders/:id/cod-remittance')

@@ -154,4 +154,14 @@ export class CreateProductDto {
   @Min(1)
   @Max(100)
   discountPercent?: number;
+
+  @Transform(({ value }) => {
+    const n = parseFloat(String(value));
+    if (!Number.isFinite(n) || n < 0 || n > 1) return undefined;
+    return n;
+  })
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  gstRate?: number;
 }

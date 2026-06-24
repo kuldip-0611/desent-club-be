@@ -18,7 +18,7 @@ export class ListProductsQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(100)
+  @Max(500)
   limit?: number;
 
   @IsOptional()
@@ -28,4 +28,12 @@ export class ListProductsQueryDto {
   @IsOptional()
   @IsEnum(StockStatus)
   stockStatus?: StockStatus;
+
+  @IsOptional()
+  @IsString()
+  categoryId?: string;
+
+  @IsOptional()
+  @IsString()
+  subcategoryId?: string;
 }

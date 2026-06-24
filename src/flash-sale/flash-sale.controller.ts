@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -33,6 +34,41 @@ export class FlashSaleController {
   @ApiOperation({ summary: 'Get all currently active flash sales (public)' })
   getActiveAll() {
     return this.flashSaleService.getActiveAll();
+  }
+
+  @Get('flash-sales/all-with-products')
+  @SkipThrottle()
+  @ApiOperation({ summary: 'Get all active flash sales with their products (public)' })
+  getAllWithProducts() {
+    return this.flashSaleService.getAllActiveSalesWithProducts();
+  }
+
+  @Get('flash-sales/:id/products')
+  @SkipThrottle()
+  @ApiOperation({ summary: 'Get products for a specific flash sale by ID (public)' })
+  getSaleProductsById(
+    @Param('id') id: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.flashSaleService.getFlashSaleProductsById(
+      id,
+      page ? parseInt(page, 10) : 1,
+      limit ? Math.min(50, parseInt(limit, 10)) : 24,
+    );
+  }
+
+  @Get('flash-sales/products')
+  @SkipThrottle()
+  @ApiOperation({ summary: 'Get products in the current active flash sale (public)' })
+  getSaleProducts(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.flashSaleService.getFlashSaleProducts(
+      page ? parseInt(page, 10) : 1,
+      limit ? Math.min(50, parseInt(limit, 10)) : 24,
+    );
   }
 
   @Get('admin/flash-sales')
