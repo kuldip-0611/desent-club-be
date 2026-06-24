@@ -28,6 +28,13 @@ export class FlashSaleController {
     return this.flashSaleService.getActive();
   }
 
+  @Get('flash-sales/active-all')
+  @SkipThrottle()
+  @ApiOperation({ summary: 'Get all currently active flash sales (public)' })
+  getActiveAll() {
+    return this.flashSaleService.getActiveAll();
+  }
+
   @Get('admin/flash-sales')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)

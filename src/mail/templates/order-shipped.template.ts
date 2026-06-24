@@ -90,6 +90,5 @@ export function buildOrderShippedEmail(data: OrderShippedData): string {
   return baseLayout({
     preheader: `Your order #${ref} has been shipped via ${data.courierName} — AWB: ${data.awbCode}`,
     content,
-    logoUrl: 'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
   })
 }

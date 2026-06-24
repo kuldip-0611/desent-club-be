@@ -22,6 +22,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import { ReturnStatus } from '@prisma/client';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
@@ -67,6 +68,7 @@ export class OrderController {
    * Validates x-razorpay-signature HMAC before processing.
    */
   @Post('webhooks/razorpay')
+  @Public()
   @HttpCode(200)
   @ApiOperation({ summary: 'Razorpay webhook receiver (public — HMAC verified)' })
   async razorpayWebhook(
@@ -94,10 +96,21 @@ export class OrderController {
   }
 
   /**
+   * GET /webhooks/shiprocket — health check for Shiprocket URL validation
+   */
+  @Get('webhooks/shiprocket')
+  @Public()
+  @HttpCode(200)
+  shiprocketWebhookCheck() {
+    return { status: 'ok' };
+  }
+
+  /**
    * POST /webhooks/shiprocket
    * Shiprocket calls this when shipment status changes (SHIPPED, DELIVERED, NDR, RTO, etc.)
    */
   @Post('webhooks/shiprocket')
+  @Public()
   @HttpCode(200)
   @ApiOperation({ summary: 'Shiprocket webhook receiver (public)' })
   async shiprocketWebhook(@Body() body: Record<string, unknown>) {

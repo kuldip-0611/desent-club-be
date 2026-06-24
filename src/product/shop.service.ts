@@ -89,6 +89,23 @@ export class ShopService {
   }
 
   async listProducts(query: ListShopProductsQueryDto = {}) {
+    // Fast path: fetch specific products by ID (used for shared wishlist, etc.)
+    if (query.ids) {
+      const idList = query.ids.split(',').map((s) => s.trim()).filter(Boolean);
+      const rows = await this.prisma.product.findMany({
+        where: { id: { in: idList }, isAvailable: true },
+        include: {
+          category: { select: { id: true, slug: true, name: true } },
+          subcategory: { select: { slug: true, name: true } },
+          images: { orderBy: { sortOrder: 'asc' } },
+          variants: true,
+          productFabrics: { include: { fabric: { select: { name: true } } } },
+        },
+      });
+      const items = await this.attachReviewStats(rows.map((row) => this.toShopProduct(row)));
+      return { items, total: items.length, page: 1, limit: items.length, hasNextPage: false };
+    }
+
     const page = Math.max(1, Number(query.page ?? 1));
     const limit = Math.min(50, Math.max(1, Number(query.limit ?? 12)));
     const search = String(query.search ?? '').trim();
@@ -192,6 +209,7 @@ export class ShopService {
           subcategory: { select: { slug: true, name: true } },
           images: { orderBy: { sortOrder: 'asc' } },
           variants: true,
+          productFabrics: { include: { fabric: { select: { name: true } } } },
         },
         orderBy,
         skip: (page - 1) * limit,
@@ -229,6 +247,7 @@ export class ShopService {
         subcategory: { select: { slug: true, name: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         variants: true,
+        productFabrics: { include: { fabric: { select: { name: true } } } },
       },
     });
     if (!row) throw new NotFoundException('Product not found');
@@ -360,51 +379,55 @@ export class ShopService {
   async getHomeData() {
     const now = new Date();
 
-    const [allCategories, featured, newest, bestSellers, cmsBanners] = await Promise.all([
-      this.listCategories(),
-      this.listProducts({ page: 1, limit: 8, sort: 'featured' }),
-      this.listProducts({ page: 1, limit: 8, sort: 'newest' }),
-      this.listProducts({ page: 1, limit: 8, sort: 'price-high' }),
-      // Fetch active hero banners from CMS
-      this.prisma.banner.findMany({
-        where: {
-          isActive: true,
-          position: 'hero',
-          AND: [
-            { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
-            { OR: [{ endsAt: null }, { endsAt: { gte: now } }] },
-          ],
-        },
-        orderBy: { sortOrder: 'asc' },
-        take: 4,
-      }),
-    ]);
+    const activeBannerWhere = (position: string) => ({
+      isActive: true,
+      position,
+      AND: [
+        { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
+        { OR: [{ endsAt: null }, { endsAt: { gte: now } }] },
+      ],
+    });
+
+    const [allCategories, featured, newest, bestSellers, heroBanners, midBanners, footerBanners] =
+      await Promise.all([
+        this.listCategories(),
+        this.listProducts({ page: 1, limit: 8, sort: 'featured' }),
+        this.listProducts({ page: 1, limit: 8, sort: 'newest' }),
+        this.listProducts({ page: 1, limit: 8, sort: 'price-high' }),
+        this.prisma.banner.findMany({ where: activeBannerWhere('hero'), orderBy: { sortOrder: 'asc' } }),
+        this.prisma.banner.findMany({ where: activeBannerWhere('mid'), orderBy: { sortOrder: 'asc' } }),
+        this.prisma.banner.findMany({ where: activeBannerWhere('footer'), orderBy: { sortOrder: 'asc' } }),
+      ]);
 
     const categories = allCategories
       .filter((category) => category.productCount > 0)
       .sort((a, b) => b.productCount - a.productCount);
 
-    // Use CMS banners if any exist, otherwise fall back to category-derived banners
-    const banners =
-      cmsBanners.length > 0
-        ? cmsBanners.map((b) => ({
-            title: b.title,
-            subtitle: b.subtitle ?? '',
-            image: b.imageUrl,
-            href: b.linkUrl ?? '/products',
-          }))
+    const mapBanner = (b: { title: string; subtitle: string | null; imageUrl: string; linkUrl: string | null }) => ({
+      title: b.title,
+      subtitle: b.subtitle ?? '',
+      image: b.imageUrl,
+      href: b.linkUrl ?? '/products',
+    });
+
+    // Fall back to category images only for hero if no CMS hero banners
+    const heroBannersOut =
+      heroBanners.length > 0
+        ? heroBanners.map(mapBanner)
         : categories
-            .filter((category) => Boolean(category.image))
+            .filter((c) => Boolean(c.image))
             .slice(0, 4)
-            .map((category) => ({
-              title: category.name,
+            .map((c) => ({
+              title: c.name,
               subtitle: 'Premium essentials curated from live catalog',
-              image: category.image,
-              href: `/products?category=${category.slug}`,
+              image: c.image,
+              href: `/products?category=${c.slug}`,
             }));
 
     return {
-      banners,
+      banners: heroBannersOut,
+      midBanners: midBanners.map(mapBanner),
+      footerBanners: footerBanners.map(mapBanner),
       categories,
       featured: featured.items,
       newest: newest.items,
@@ -423,6 +446,7 @@ export class ShopService {
     subcategory: { slug: string; name: string } | null;
     images: { path: string; color: string }[];
     variants: { id: string; size: string; color: string; quantity: number }[];
+    productFabrics?: { fabric: { name: string }; percent?: number | null }[];
     createdAt: Date;
   }) {
     const basePrice = Number(row.price);
@@ -483,6 +507,10 @@ export class ShopService {
       variants: variants.length ? variants : [{ id: `${row.id}-v1`, size: 'M', colorName: 'Default', colorHex: '#111827', stock: 0 }],
       isNewArrival: true,
       isBestSeller: true,
+      materials: (row.productFabrics ?? []).map((pf) => ({
+        name: pf.fabric.name,
+        percent: pf.percent ?? undefined,
+      })),
     };
   }
 

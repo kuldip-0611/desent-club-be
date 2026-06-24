@@ -96,6 +96,5 @@ export function buildRefundProcessedEmail(data: RefundProcessedData): string {
   return baseLayout({
     preheader: `Refund of ₹${data.amount.toFixed(2)} initiated for order #${ref}`,
     content,
-    logoUrl: 'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
   })
 }

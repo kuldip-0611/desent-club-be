@@ -21,3 +21,8 @@ export const resolveSiteUrl = (value?: string | null): string => {
   if (explicit) return explicit.replace(/\/+$/, '')
   return SITE_URLS[parseAppEnv()]
 }
+
+export const resolveBrandLogoUrl = (siteUrl?: string): string => {
+  const base = siteUrl?.replace(/\/+$/, '') || resolveSiteUrl()
+  return `${base}/logo.png`
+}

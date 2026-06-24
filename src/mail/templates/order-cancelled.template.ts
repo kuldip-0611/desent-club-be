@@ -59,6 +59,5 @@ export function buildOrderCancelledEmail(data: OrderCancelledData): string {
   return baseLayout({
     preheader: `Your order #${ref} has been cancelled${willRefund ? ` — refund of ₹${data.total.toFixed(2)} initiated` : ''}`,
     content,
-    logoUrl: 'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
   })
 }

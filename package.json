@@ -5,7 +5,11 @@
   "author": "",
   "private": true,
   "license": "UNLICENSED",
+  "prisma": {
+    "seed": "ts-node -r tsconfig-paths/register prisma/seed.ts"
+  },
   "scripts": {
+    "db:seed": "ts-node -r tsconfig-paths/register prisma/seed.ts",
     "db:align-products": "node scripts/align-product-db.js",
     "db:align-product-categories": "node scripts/align-product-categories-db.js",
     "db:align-product-subcategories": "node scripts/align-product-subcategories-db.js",
@@ -42,6 +46,7 @@
     "@nestjs/swagger": "^11.4.1",
     "@nestjs/throttler": "^6.5.0",
     "@prisma/client": "6",
+    "@types/pdfkit": "^0.17.6",
     "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
@@ -49,6 +54,7 @@
     "google-auth-library": "^10.6.2",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
+    "pdfkit": "^0.19.1",
     "prisma": "6",
     "puppeteer": "^25.1.0",
     "razorpay": "^2.9.6",

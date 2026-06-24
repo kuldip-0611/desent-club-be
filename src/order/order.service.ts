@@ -1,4 +1,5 @@
 import { createHmac } from 'crypto';
+import { resolveSiteUrl } from '../common/site.constants';
 import {
   BadRequestException,
   Injectable,
@@ -164,10 +165,13 @@ export class OrderService {
     if (dto.couponCode) {
       // Use the canonical validateForSubtotal which enforces all rules
       // including per-user once-per-coupon limit
+      const cartCategoryIds = [...new Set(
+        products.map((p) => p.categoryId).filter((id): id is string => Boolean(id)),
+      )];
       const couponCheck = await this.couponService.validateForSubtotal(
         dto.couponCode,
         subtotal.toNumber(),
-        undefined,
+        cartCategoryIds,
         userId,
       );
       if (!couponCheck.valid) {
@@ -619,7 +623,7 @@ export class OrderService {
         include: {
           items: {
             include: {
-              product: { select: { id: true, name: true, images: { take: 1 } } },
+              product: { select: { id: true, name: true, slug: true, images: { take: 1 } } },
             },
           },
           payment: { select: { status: true, razorpayPaymentId: true } },
@@ -907,7 +911,12 @@ export class OrderService {
       refundMode = 'none';
     }
 
-    // ── Step 4: push notification ─────────────────────────────────────────────
+    // ── Step 4: reverse loyalty points ───────────────────────────────────────
+    this.loyalty.reverseOrderPoints(userId, orderId).catch((err: Error) =>
+      console.error(`[Loyalty] Failed to reverse points for order ${orderId}:`, err?.message),
+    );
+
+    // ── Step 5: push notification ─────────────────────────────────────────────
     const cancelUser = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { fcmToken: true },
@@ -2166,26 +2175,209 @@ export class OrderService {
     });
     if (!order) throw new Error('Order not found');
 
-    const html = this.buildInvoiceHtml(order);
+    // Derive shipping & GST from order totals
+    const orderAny = order as unknown as Record<string, Prisma.Decimal | null>;
+    const gstAmount = Number(orderAny['igst'] ?? 0) + Number(orderAny['cgst'] ?? 0) + Number(orderAny['sgst'] ?? 0);
+    const afterDiscount = Number(order.subtotal) - Number(order.discountAmount);
+    const shippingAmount = afterDiscount > 1999 ? 0 : 99;
+
+    // Fetch logo from S3 as buffer so PDFKit can embed it
+    let logoBuffer: Buffer | null = null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const https = require('https') as typeof import('https');
+      logoBuffer = await new Promise<Buffer>((res, rej) => {
+        const chunks: Buffer[] = [];
+        https.get(
+          'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
+          (response) => {
+            response.on('data', (c: Buffer) => chunks.push(c));
+            response.on('end', () => res(Buffer.concat(chunks)));
+            response.on('error', rej);
+          },
+        ).on('error', rej);
+      });
+    } catch { logoBuffer = null; }
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const puppeteer = require('puppeteer') as typeof import('puppeteer');
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    });
-    try {
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'load' });
-      const pdf = await page.pdf({
-        format: 'A4',
-        printBackground: true,
-        margin: { top: '0', right: '0', bottom: '0', left: '0' },
+    const PDFDocument = require('pdfkit') as typeof import('pdfkit');
+
+    return new Promise<Buffer>((resolve, reject) => {
+      const doc = new PDFDocument({ size: 'A4', margin: 0, autoFirstPage: true });
+      const chunks: Buffer[] = [];
+      doc.on('data', (c: Buffer) => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const ref = order.id.slice(-8).toUpperCase();
+      const dateStr = new Date(order.createdAt).toLocaleDateString('en-IN', {
+        day: 'numeric', month: 'long', year: 'numeric',
       });
-      return Buffer.from(pdf);
-    } finally {
-      await browser.close();
-    }
+      const addr = order.shippingAddress as Record<string, string> | null;
+      const M = 40;           // margin
+      const PW = 595 - M * 2; // usable width (A4 = 595pt)
+      const dark  = '#0f172a';
+      const indigo = '#4f46e5';
+      const slate  = '#475569';
+      const muted  = '#94a3b8';
+      const line   = '#e2e8f0';
+      const bgGrey = '#f8fafc';
+      const isPaid = order.payment?.status === 'PAID';
+      const isCod  = order.payment?.method === 'COD';
+
+      // ── 1. HEADER BAND ──────────────────────────────────────────────────────
+      doc.rect(0, 0, 595, 100).fill(dark);
+
+      // Logo or brand name
+      if (logoBuffer) {
+        try {
+          doc.image(logoBuffer, M, 18, { height: 64, fit: [160, 64] });
+        } catch {
+          doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(22).text('DISENT CLUB', M, 34);
+        }
+      } else {
+        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(22).text('DISENT CLUB', M, 34);
+      }
+
+      // TAX INVOICE right side
+      doc.fillColor('#a5b4fc').font('Helvetica-Bold').fontSize(11)
+        .text('TAX INVOICE', M, 20, { align: 'right', width: PW });
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(22)
+        .text(`#${ref}`, M, 35, { align: 'right', width: PW });
+      doc.fillColor('#94a3b8').font('Helvetica').fontSize(9)
+        .text(dateStr, M, 62, { align: 'right', width: PW });
+
+      // ── 2. STATUS BAR ───────────────────────────────────────────────────────
+      const statusBg  = isPaid ? '#dcfce7' : isCod ? '#fef9c3' : '#fee2e2';
+      const statusClr = isPaid ? '#15803d' : isCod ? '#854d0e' : '#b91c1c';
+      const statusTxt = isPaid ? 'PAID' : isCod ? 'CASH ON DELIVERY' : 'PAYMENT PENDING';
+      doc.rect(0, 100, 595, 28).fill(statusBg);
+      doc.fillColor(statusClr).font('Helvetica-Bold').fontSize(9)
+        .text(statusTxt, M, 110, { width: PW, align: 'center' });
+
+      // ── 3. BILLING / SHIPPING BOXES ─────────────────────────────────────────
+      let y = 148;
+      const half = PW / 2 - 8;
+      const col2 = M + half + 16;
+      const boxH = 100;
+
+      // Box backgrounds
+      doc.roundedRect(M, y, half, boxH, 6).fill(bgGrey);
+      doc.roundedRect(col2, y, half, boxH, 6).fill(bgGrey);
+
+      // Left: Billed To
+      doc.fillColor(indigo).font('Helvetica-Bold').fontSize(7.5)
+        .text('BILLED TO', M + 12, y + 10, { characterSpacing: 1, lineBreak: false });
+      doc.moveTo(M + 12, y + 22).lineTo(M + half - 12, y + 22).strokeColor(line).lineWidth(0.5).stroke();
+      doc.fillColor(dark).font('Helvetica-Bold').fontSize(10)
+        .text(order.user.name ?? '', M + 12, y + 30, { width: half - 24, lineBreak: false });
+      doc.fillColor(slate).font('Helvetica').fontSize(9)
+        .text(order.user.email ?? '', M + 12, y + 48, { width: half - 24, lineBreak: false });
+
+      // Right: Ship To
+      doc.fillColor(indigo).font('Helvetica-Bold').fontSize(7.5)
+        .text('SHIP TO', col2 + 12, y + 10, { characterSpacing: 1, lineBreak: false });
+      doc.moveTo(col2 + 12, y + 22).lineTo(col2 + half - 12, y + 22).strokeColor(line).lineWidth(0.5).stroke();
+      if (addr) {
+        const addrLine1 = addr.line1 ?? '';
+        const addrLine2 = addr.line2 && addr.line2.trim() ? addr.line2.trim() : '';
+        const cityState = `${addr.city ?? ''}, ${addr.state ?? ''} - ${addr.pincode ?? ''}`;
+        doc.fillColor(dark).font('Helvetica-Bold').fontSize(10)
+          .text(addr.fullName ?? '', col2 + 12, y + 30, { width: half - 24, lineBreak: false });
+        doc.fillColor(slate).font('Helvetica').fontSize(8.5);
+        // Flow each non-empty address part on its own line to avoid overlap
+        const addrParts = [addrLine1, addrLine2, cityState, addr.phone ?? ''].filter(Boolean);
+        let addrY = y + 48;
+        for (const part of addrParts) {
+          doc.text(part, col2 + 12, addrY, { width: half - 24, lineBreak: false });
+          addrY += 14;
+        }
+      }
+
+      // ── 4. ITEMS TABLE ──────────────────────────────────────────────────────
+      y += boxH + 14;
+      doc.fillColor(indigo).font('Helvetica-Bold').fontSize(7.5)
+        .text('ORDER ITEMS', M, y, { characterSpacing: 1 });
+      y += 14;
+
+      // Header row
+      doc.rect(M, y, PW, 26).fill(indigo);
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(8.5);
+      const c1 = M + 10, c2 = M + PW * 0.56, c3 = M + PW * 0.72, c4 = M + PW * 0.86;
+      doc.text('ITEM DESCRIPTION', c1, y + 9, { width: PW * 0.54 });
+      doc.text('QTY', c2, y + 9, { width: PW * 0.14, align: 'center' });
+      doc.text('UNIT PRICE', c3, y + 9, { width: PW * 0.13, align: 'right' });
+      doc.text('AMOUNT', c4, y + 9, { width: PW * 0.12, align: 'right' });
+      y += 26;
+
+      order.items.forEach((item, i) => {
+        const rowH = 30;
+        doc.rect(M, y, PW, rowH).fill(i % 2 === 0 ? '#ffffff' : bgGrey);
+        // left border accent
+        doc.rect(M, y, 3, rowH).fill(indigo);
+
+        const label = `${item.product.name}${item.size ? ' · ' + item.size : ''}${item.color ? ' · ' + item.color : ''}`;
+        doc.fillColor(dark).font('Helvetica-Bold').fontSize(9)
+          .text(label, c1, y + 10, { width: PW * 0.54 });
+
+        doc.fillColor(slate).font('Helvetica').fontSize(9);
+        doc.text(String(item.quantity), c2, y + 10, { width: PW * 0.14, align: 'center' });
+        doc.text(`Rs. ${Number(item.unitPrice).toFixed(2)}`, c3, y + 10, { width: PW * 0.13, align: 'right' });
+        doc.fillColor(dark).font('Helvetica-Bold').fontSize(9)
+          .text(`Rs. ${Number(item.total).toFixed(2)}`, c4, y + 10, { width: PW * 0.12, align: 'right' });
+        y += rowH;
+      });
+
+      // Bottom border of table
+      doc.rect(M, y, PW, 1).fill(line);
+      y += 16;
+
+      // ── 5. TOTALS ───────────────────────────────────────────────────────────
+      const tw = 230;
+      const tx = M + PW - tw;
+
+      const drawRow = (label: string, value: string, bold = false, clr = slate, bigFont = false) => {
+        doc.fillColor(clr).font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bigFont ? 12 : 9.5)
+          .text(label, tx, y, { width: tw * 0.52 });
+        doc.fillColor(clr).font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bigFont ? 12 : 9.5)
+          .text(value, tx + tw * 0.52, y, { width: tw * 0.48 - 10, align: 'right' });
+        y += bigFont ? 20 : 16;
+      };
+
+      drawRow('Subtotal', `Rs. ${Number(order.subtotal).toFixed(2)}`);
+
+      if (Number(order.discountAmount) > 0) {
+        const disc = order.coupon ? `Coupon (${order.coupon.code})` : 'Discount';
+        drawRow(disc, `- Rs. ${Number(order.discountAmount).toFixed(2)}`, false, '#16a34a');
+      }
+
+      if (shippingAmount > 0) drawRow('Shipping', `Rs. ${shippingAmount.toFixed(2)}`);
+      if (gstAmount > 0) drawRow(`GST (18%)`, `Rs. ${gstAmount.toFixed(2)}`);
+
+      // Grand total box
+      y += 4;
+      doc.rect(tx - 8, y - 4, tw + 8, 36).fill(indigo);
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(11)
+        .text('TOTAL PAYABLE', tx, y + 8, { width: tw * 0.52 });
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(13)
+        .text(`Rs. ${Number(order.total).toFixed(2)}`, tx + tw * 0.52, y + 7, { width: tw * 0.48 - 10, align: 'right' });
+      y += 48;
+
+      // ── 6. THANK YOU + FOOTER ───────────────────────────────────────────────
+      y += 16;
+      doc.rect(M, y, PW, 56).fill(bgGrey);
+      doc.fillColor(indigo).font('Helvetica-Bold').fontSize(11)
+        .text('Thank you for shopping with Disent Club!', M + 12, y + 10, { width: PW - 24, align: 'center' });
+      doc.fillColor(muted).font('Helvetica').fontSize(8.5)
+        .text(`For support: ${this.supportEmail}  |  ${resolveSiteUrl(this.config.get<string>('NEXT_PUBLIC_SITE_URL')).replace(/^https?:\/\//, '')}`, M + 12, y + 28, { width: PW - 24, align: 'center' });
+      doc.fillColor(muted).font('Helvetica').fontSize(8)
+        .text('Returns accepted within 3 days of delivery. Keep this invoice for reference.', M + 12, y + 42, { width: PW - 24, align: 'center' });
+
+      // Bottom accent bar
+      doc.rect(0, 595 + 247 - 8, 595, 8).fill(indigo);
+
+      doc.end();
+    });
   }
 
   /** @deprecated kept for backward compat — use generateInvoicePdf */

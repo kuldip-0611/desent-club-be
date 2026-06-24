@@ -16,6 +16,14 @@ export type UpdateFlashSaleDto = Partial<CreateFlashSaleDto>;
 export class FlashSaleService {
   constructor(private readonly prisma: PrismaService) {}
 
+  async getActiveAll() {
+    const now = new Date();
+    return this.prisma.flashSale.findMany({
+      where: { isActive: true, startsAt: { lte: now }, endsAt: { gte: now } },
+      orderBy: { endsAt: 'asc' },
+    });
+  }
+
   async getActive() {
     const now = new Date();
     return this.prisma.flashSale.findFirst({

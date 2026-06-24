@@ -487,9 +487,16 @@ export class ProductService {
         where: { productId: id },
       });
       if (variantCount > 0) {
-        throw new BadRequestException(
-          'Stock is split by size — send the full `variants` array to update quantities for this product.',
-        );
+        if (dto.quantity !== 0) {
+          throw new BadRequestException(
+            'Stock is split by size — send the full `variants` array to update quantities for this product.',
+          );
+        }
+        // quantity: 0 → zero out all variant stock
+        await this.prisma.productVariant.updateMany({
+          where: { productId: id },
+          data: { quantity: 0 },
+        });
       }
       data.quantity = dto.quantity;
     } else if (newMeasurementAttrIds !== null) {
@@ -780,15 +787,14 @@ export class ProductService {
     }
 
     const now = new Date();
-    const values = rows.map((row, index) => {
+    const values = rows.map((row) => {
       const id = randomUUID();
-      const sku = this.makeVariantSku(productId, row.size, index);
-      return Prisma.sql`(${id}, ${productId}, ${row.size}, ${row.color}, ${row.quantity}, ${sku}, ${row.sizeId}, ${row.quantity}, ${now}, ${now})`;
+      return Prisma.sql`(${id}, ${productId}, ${row.size}, ${row.color}, ${row.sizeId}, ${row.quantity}, ${now}, ${now})`;
     });
 
     await tx.$executeRaw(Prisma.sql`
       INSERT INTO ProductVariant
-        (id, productId, size, color, stock, sku, sizeId, quantity, createdAt, updatedAt)
+        (id, productId, size, color, sizeId, quantity, createdAt, updatedAt)
       VALUES ${Prisma.join(values, ', ')}
     `);
   }

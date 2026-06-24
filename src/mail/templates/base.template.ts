@@ -1,5 +1,5 @@
 /** Shared base layout for all Disent Club transactional emails */
-import { resolveSiteUrl } from '../../common/site.constants'
+import { resolveBrandLogoUrl, resolveSiteUrl } from '../../common/site.constants'
 
 export function baseLayout(opts: {
   preheader?: string
@@ -16,6 +16,8 @@ export function baseLayout(opts: {
     logoUrl,
     siteUrl = resolveSiteUrl(),
   } = opts
+
+  const brandLogoUrl = logoUrl ?? resolveBrandLogoUrl(siteUrl)
 
   return `<!DOCTYPE html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
@@ -64,20 +66,17 @@ export function baseLayout(opts: {
                     <table width="100%" cellpadding="0" cellspacing="0" border="0">
                       <tr>
                         <td style="vertical-align:middle">
-                          ${logoUrl
-                            ? `<img src="${logoUrl}" alt="Disent Club" width="130" height="auto" border="0"
-                                 style="display:block;max-width:130px;height:auto" />`
-                            : `<div style="font-size:26px;font-weight:900;color:#ffffff;letter-spacing:-0.5px;line-height:1">Disent<span style="color:#c7d2fe"> Club</span></div>
-                               <div style="font-size:10px;color:rgba(255,255,255,0.6);letter-spacing:0.18em;text-transform:uppercase;margin-top:4px">Premium Fashion</div>`
-                          }
+                          <div style="font-size:26px;font-weight:900;color:#ffffff;letter-spacing:-0.5px;line-height:1">Disent<span style="color:#c7d2fe"> Club</span></div>
+                          <div style="font-size:10px;color:rgba(255,255,255,0.6);letter-spacing:0.18em;text-transform:uppercase;margin-top:4px">Premium Fashion</div>
                         </td>
-                        <td align="right" style="vertical-align:middle;width:60px">
-                          <!-- Decorative circle (table-based for email client compatibility) -->
-                          <table cellpadding="0" cellspacing="0" border="0" align="right">
-                            <tr>
-                              <td width="56" height="56" style="width:56px;height:56px;border-radius:28px;background:rgba(255,255,255,0.12);font-size:0;line-height:0">&nbsp;</td>
-                            </tr>
-                          </table>
+                        <td align="right" style="vertical-align:middle;width:64px">
+                          <img
+                            src="${brandLogoUrl}"
+                            alt="Disent Club"
+                            width="56"
+                            height="56"
+                            style="display:block;width:56px;height:56px;border-radius:12px;background:rgba(255,255,255,0.95);padding:4px;object-fit:contain"
+                          />
                         </td>
                       </tr>
                     </table>

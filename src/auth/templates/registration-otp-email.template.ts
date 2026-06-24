@@ -1,8 +1,4 @@
 import { baseLayout } from '../../mail/templates/base.template'
-import { resolveSiteUrl } from '../../common/site.constants'
-
-const siteUrl = resolveSiteUrl()
-const LOGO_URL = `${siteUrl}/logo.png`
 
 export function buildRegistrationOtpEmail(otp: string): {
   subject: string
@@ -54,7 +50,6 @@ export function buildRegistrationOtpEmail(otp: string): {
   const html = baseLayout({
     preheader: `${otp} is your Disent Club verification code`,
     content,
-    logoUrl: LOGO_URL,
   })
 
   return { subject, text, html }

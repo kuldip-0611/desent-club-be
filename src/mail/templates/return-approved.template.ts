@@ -104,6 +104,5 @@ export function buildReturnApprovedEmail(data: ReturnApprovedData): string {
   return baseLayout({
     preheader: `Your ${isExchange ? 'exchange' : 'return'} request for order #${ref} has been approved — pickup scheduled`,
     content,
-    logoUrl: 'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
   })
 }

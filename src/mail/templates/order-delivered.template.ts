@@ -70,6 +70,5 @@ export function buildOrderDeliveredEmail(data: OrderDeliveredData): string {
   return baseLayout({
     preheader: `Your Disent Club order #${ref} has been delivered — share your experience!`,
     content,
-    logoUrl: 'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
   })
 }

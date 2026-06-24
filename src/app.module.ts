@@ -42,8 +42,8 @@ import { ReviewsModule } from './reviews/reviews.module';
     ReferralModule,
     ScheduleModule.forRoot(),
     ThrottlerModule.forRoot([
-      { name: 'short', ttl: 60000, limit: 60 },
-      { name: 'long', ttl: 3600000, limit: 1000 },
+      { name: 'short', ttl: 60000, limit: 300 },
+      { name: 'long', ttl: 3600000, limit: 5000 },
     ]),
     FirebaseModule,
     ShiprocketModule,

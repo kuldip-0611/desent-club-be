@@ -1,7 +1,4 @@
 import { baseLayout, ctaButton } from '../../mail/templates/base.template'
-import { resolveSiteUrl } from '../../common/site.constants'
-
-const LOGO_URL = `${resolveSiteUrl()}/logo.png`
 
 export function buildPasswordResetEmail(resetLink: string): {
   subject: string
@@ -41,15 +38,11 @@ export function buildPasswordResetEmail(resetLink: string): {
       </tr>
     </table>
 
-    <p style="margin:20px 0 0;font-size:12px;color:#94a3b8;line-height:1.6;word-break:break-all">
-      Or copy this link into your browser:<br/>
-      <a href="${resetLink}" style="color:#6366f1;text-decoration:none">${resetLink}</a>
-    </p>`
+  `
 
   const html = baseLayout({
     preheader: 'Reset your Disent Club password — link expires in 1 hour',
     content,
-    logoUrl: LOGO_URL,
   })
 
   return { subject, text, html }

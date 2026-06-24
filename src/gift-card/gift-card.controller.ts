@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query, Request, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Request, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -10,15 +10,27 @@ import { GiftCardService } from './gift-card.service';
 export class GiftCardController {
   constructor(private readonly giftCardService: GiftCardService) {}
 
-  @Post('gift-cards/purchase')
+  /** Step 1 — Create Razorpay order. Returns razorpayOrderId + keyId. No gift card is active yet. */
+  @Post('gift-cards/initiate')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Purchase a gift card' })
-  purchaseGiftCard(
+  @ApiOperation({ summary: 'Initiate gift card purchase (creates Razorpay order)' })
+  initiateGiftCardPurchase(
     @Request() req: { user: { sub: string } },
     @Body() body: { amount: number; recipientEmail: string; recipientName?: string; message?: string },
   ) {
-    return this.giftCardService.purchaseGiftCard(req.user.sub, body);
+    return this.giftCardService.initiateGiftCardPurchase(req.user.sub, body);
+  }
+
+  /** Step 2 — Verify Razorpay signature. Activates gift card and sends recipient email. */
+  @Post('gift-cards/verify-payment')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Verify payment and activate gift card' })
+  verifyGiftCardPayment(
+    @Body() body: { razorpayOrderId: string; razorpayPaymentId: string; razorpaySignature: string },
+  ) {
+    return this.giftCardService.verifyGiftCardPayment(body);
   }
 
   @Post('gift-cards/check')
@@ -39,7 +51,7 @@ export class GiftCardController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN')
   @ApiBearerAuth()
-  @ApiOperation({ summary: '[Admin] List all gift cards' })
+  @ApiOperation({ summary: '[Admin] List all paid gift cards' })
   adminListGiftCards(
     @Query('page') page?: string,
     @Query('limit') limit?: string,
@@ -48,5 +60,14 @@ export class GiftCardController {
       page ? parseInt(page, 10) : 1,
       limit ? parseInt(limit, 10) : 20,
     );
+  }
+
+  @Patch('admin/gift-cards/:id/deactivate')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '[Admin] Deactivate a gift card' })
+  deactivateGiftCard(@Param('id') id: string) {
+    return this.giftCardService.deactivateGiftCard(id);
   }
 }

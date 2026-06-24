@@ -127,6 +127,5 @@ export function buildOrderConfirmationEmail(data: OrderConfirmationData): string
   return baseLayout({
     preheader: `Your order #${ref} is confirmed — ₹${data.total.toFixed(2)}`,
     content,
-    logoUrl: 'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
   })
 }

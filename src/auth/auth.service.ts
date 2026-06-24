@@ -258,16 +258,16 @@ export class AuthService {
   async adminLogin(dto: AdminLoginDto): Promise<AuthTokens> {
     const user = await this.userService.findByEmail(dto.email);
     if (!user || user.role !== UserRole.ADMIN) {
-      throw new UnauthorizedException('Invalid email');
+      throw new UnauthorizedException('Invalid credentials');
     }
 
     if (!user.password) {
-      throw new UnauthorizedException('Please Enter Password');
+      throw new UnauthorizedException('Invalid credentials');
     }
 
     const passwordValid = await bcrypt.compare(dto.password, user.password);
     if (!passwordValid) {
-      throw new UnauthorizedException('Invalid password');
+      throw new UnauthorizedException('Invalid credentials');
     }
 
     return this.issueTokens(user);

@@ -69,4 +69,9 @@ export class ListShopProductsQueryDto {
   @IsOptional()
   @IsString()
   fabrics?: string;
+
+  /** Comma-separated product IDs — when provided, all other filters are ignored */
+  @IsOptional()
+  @IsString()
+  ids?: string;
 }

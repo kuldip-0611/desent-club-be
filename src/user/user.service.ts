@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { existsSync, unlinkSync } from 'fs';
 import { Prisma } from '@prisma/client';
 import { AuthProviderType, User, UserRole } from '@prisma/client';
@@ -10,6 +10,8 @@ import { UpdateUserAdminDto } from './dto/update-user-admin.dto';
 
 @Injectable()
 export class UserService {
+  private readonly logger = new Logger(UserService.name);
+
   constructor(
     private readonly prismaService: PrismaService,
     private readonly couponService: CouponService,
@@ -219,6 +221,7 @@ export class UserService {
       where: { id: userId },
       data: { fcmToken: token },
     });
+    this.logger.log(`FCM token saved for user ${userId} (token: …${token.slice(-12)})`);
   }
 
   async updateByAdmin(userId: string, dto: UpdateUserAdminDto): Promise<User> {

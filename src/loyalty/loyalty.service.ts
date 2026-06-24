@@ -111,6 +111,71 @@ export class LoyaltyService {
     return points;
   }
 
+  // ── Reverse points on order cancellation ─────────────────────────────────
+
+  async reverseOrderPoints(userId: string, orderId: string): Promise<void> {
+    // Find all loyalty transactions for this order
+    const txns = await this.prisma.loyaltyTransaction.findMany({
+      where: { orderId, account: { userId } },
+    });
+    if (!txns.length) return;
+
+    // Net points to reverse: earned - already-redeemed adjustments for this order
+    const netEarned = txns
+      .filter((t) => t.type === LoyaltyTxType.EARNED)
+      .reduce((sum, t) => sum + t.points, 0);
+    const netRedeemed = txns
+      .filter((t) => t.type === LoyaltyTxType.REDEEMED)
+      .reduce((sum, t) => sum + Math.abs(t.points), 0);
+
+    const ops: Promise<unknown>[] = [];
+
+    if (netEarned > 0) {
+      // Deduct earned points (capped so balance doesn't go negative)
+      const account = await this.prisma.loyaltyAccount.findUnique({ where: { userId } });
+      const deduct = Math.min(netEarned, account?.balance ?? 0);
+      if (deduct > 0) {
+        ops.push(
+          this.prisma.loyaltyAccount.update({
+            where: { userId },
+            data: { balance: { decrement: deduct }, totalEarned: { decrement: deduct } },
+          }),
+          this.prisma.loyaltyTransaction.create({
+            data: {
+              account: { connect: { userId } },
+              type: LoyaltyTxType.ADJUSTED,
+              points: -deduct,
+              description: `Points reversed — order #${orderId.slice(-8).toUpperCase()} cancelled`,
+              orderId,
+            },
+          }),
+        );
+      }
+    }
+
+    if (netRedeemed > 0) {
+      // Restore redeemed points back to the balance
+      ops.push(
+        this.prisma.loyaltyAccount.update({
+          where: { userId },
+          data: { balance: { increment: netRedeemed }, totalRedeemed: { decrement: netRedeemed } },
+        }),
+        this.prisma.loyaltyTransaction.create({
+          data: {
+            account: { connect: { userId } },
+            type: LoyaltyTxType.ADJUSTED,
+            points: netRedeemed,
+            description: `Redeemed points restored — order #${orderId.slice(-8).toUpperCase()} cancelled`,
+            orderId,
+          },
+        }),
+      );
+    }
+
+    if (ops.length) await Promise.all(ops);
+    this.logger.log(`Loyalty reversed for user ${userId} on cancelled order ${orderId} (earned=${netEarned}, redeemed=${netRedeemed})`);
+  }
+
   // ── Redeem points at checkout ─────────────────────────────────────────────
 
   async redeemPoints(userId: string, points: number, orderId: string): Promise<number> {
