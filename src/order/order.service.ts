@@ -972,6 +972,65 @@ export class OrderService {
     return { message: 'Delivery address updated successfully' };
   }
 
+  async updateOrderItemSize(
+    userId: string,
+    orderId: string,
+    itemId: string,
+    newSize: string,
+  ): Promise<{ message: string }> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+      include: { items: { where: { id: itemId }, include: { product: { include: { variants: true } } } } },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    const editableStatuses: string[] = [OrderStatus.PENDING, OrderStatus.CONFIRMED];
+    if (!editableStatuses.includes(order.status)) {
+      throw new BadRequestException(
+        `Size can only be changed for PENDING or CONFIRMED orders. This order is ${order.status}.`,
+      );
+    }
+
+    const item = order.items[0];
+    if (!item) throw new NotFoundException('Order item not found');
+    if (!item.size) throw new BadRequestException('This item has no size to change');
+
+    const normalised = newSize.trim().toUpperCase();
+    if (item.size.toUpperCase() === normalised) {
+      throw new BadRequestException('That is already the selected size');
+    }
+
+    // Check stock for the new size variant
+    const newVariant = item.product.variants.find(
+      (v) => v.size?.toUpperCase() === normalised && (!v.color || !item.color || v.color === item.color),
+    );
+
+    if (newVariant) {
+      if (newVariant.quantity < item.quantity) {
+        throw new BadRequestException(`Only ${newVariant.quantity} unit(s) of size ${normalised} are available`);
+      }
+      // Restore old variant stock and reserve new variant stock
+      const oldVariant = item.product.variants.find(
+        (v) => v.size?.toUpperCase() === item.size!.toUpperCase() && (!v.color || !item.color || v.color === item.color),
+      );
+      await this.prisma.$transaction([
+        ...(oldVariant
+          ? [this.prisma.productVariant.update({ where: { id: oldVariant.id }, data: { quantity: { increment: item.quantity } } })]
+          : []),
+        this.prisma.productVariant.update({ where: { id: newVariant.id }, data: { quantity: { decrement: item.quantity } } }),
+        this.prisma.orderItem.update({ where: { id: itemId }, data: { size: normalised } }),
+      ]);
+    } else {
+      // No variant tracking — just check master product stock and update the item
+      if (item.product.quantity < item.quantity) {
+        throw new BadRequestException(`Size ${normalised} is not available`);
+      }
+      await this.prisma.orderItem.update({ where: { id: itemId }, data: { size: normalised } });
+    }
+
+    return { message: `Size updated to ${normalised} successfully` };
+  }
+
   /**
    * Initiates a Razorpay refund for a cancelled paid order.
    * Returns `mode: 'local'` when the payment ID is simulated (test/dev),
@@ -1729,10 +1788,15 @@ export class OrderService {
       canReturn = new Date() <= windowEnd;
     }
 
+    const preShipment = [OrderStatus.PENDING, OrderStatus.CONFIRMED].includes(order.status as OrderStatus);
+    const hasSizedItems = order.items.some((i) => !!i.size);
+
     return {
       ...order,
       actions: {
         canCancel: USER_CANCELLABLE.includes(order.status) && !latestReturn,
+        canEditSize: preShipment && hasSizedItems && !latestReturn,
+        canChangeAddress: preShipment && !latestReturn,
         canReturn,
         canReview: order.status === OrderStatus.DELIVERED && unreviewedItems.length > 0,
         returnStatus: latestReturn?.status ?? null,

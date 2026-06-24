@@ -182,6 +182,17 @@ export class OrderController {
     return this.orderService.requestReturn(req.user.sub, id, dto);
   }
 
+  @Patch('orders/my/:id/items/:itemId/size')
+  @ApiOperation({ summary: 'Update size of an order item (PENDING/CONFIRMED orders only)' })
+  updateOrderItemSize(
+    @Request() req: { user: { sub: string } },
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+    @Body() body: { size: string },
+  ) {
+    return this.orderService.updateOrderItemSize(req.user.sub, id, itemId, body.size);
+  }
+
   @Get('orders/my/:id/items/:itemId/sizes')
   @ApiOperation({ summary: 'Get available sizes for a specific order item (for exchange flow)' })
   getOrderItemSizes(
