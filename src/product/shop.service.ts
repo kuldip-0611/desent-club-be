@@ -39,6 +39,16 @@ const slugify = (value: string): string =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Resolve a "slug" param that may be a plain slug, a UUID, or legacy "name--uuid" */
+const resolveSlugOrId = (param: string): { slug?: string; id?: string } => {
+  if (UUID_RE.test(param)) return { id: param };
+  const last = param.includes('--') ? param.split('--').pop() ?? '' : '';
+  if (UUID_RE.test(last)) return { id: last };
+  return { slug: param };
+};
+
 @Injectable()
 export class ShopService {
   constructor(private readonly prisma: PrismaService) {}
@@ -235,10 +245,10 @@ export class ShopService {
   }
 
   async getProductBySlug(slug: string) {
-    const id = slug.includes('--') ? slug.split('--').pop() ?? '' : slug;
+    const lookup = resolveSlugOrId(slug);
     const row = await this.prisma.product.findFirst({
       where: {
-        id,
+        ...lookup,
         isAvailable: true,
         category: { isNot: null, is: { isActive: true } },
       },
@@ -265,8 +275,7 @@ export class ShopService {
   }
 
   async getProductReviews(slug: string, page = 1, limit = 10) {
-    const id = slug.includes('--') ? slug.split('--').pop() ?? '' : slug;
-    const product = await this.prisma.product.findUnique({ where: { id }, select: { id: true } });
+    const product = await this.prisma.product.findFirst({ where: resolveSlugOrId(slug), select: { id: true } });
     if (!product) throw new NotFoundException('Product not found');
 
     const skip = (page - 1) * limit;
@@ -304,9 +313,8 @@ export class ShopService {
   }
 
   async listRelatedProducts(slug: string) {
-    const id = slug.includes('--') ? slug.split('--').pop() ?? '' : slug;
-    const source = await this.prisma.product.findUnique({
-      where: { id },
+    const source = await this.prisma.product.findFirst({
+      where: resolveSlugOrId(slug),
       select: { id: true, categoryId: true },
     });
     if (!source?.categoryId) return [];
@@ -520,9 +528,8 @@ export class ShopService {
 
   /** Returns the size guide table for a product (variants × measurement attributes) */
   async getSizeChart(slug: string) {
-    const id = slug.includes('--') ? slug.split('--').pop() ?? '' : slug;
     const product = await this.prisma.product.findFirst({
-      where: { id, isAvailable: true },
+      where: { ...resolveSlugOrId(slug), isAvailable: true },
       include: {
         variants: {
           include: {
@@ -633,8 +640,7 @@ export class ShopService {
     userId: string,
     body: { rating: number; comment?: string; orderItemId: string },
   ) {
-    const id = slug.includes('--') ? slug.split('--').pop() ?? '' : slug;
-    const product = await this.prisma.product.findUnique({ where: { id }, select: { id: true } });
+    const product = await this.prisma.product.findFirst({ where: resolveSlugOrId(slug), select: { id: true } });
     if (!product) throw new NotFoundException('Product not found');
 
     if (body.rating < 1 || body.rating > 5) {
