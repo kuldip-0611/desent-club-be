@@ -34,9 +34,14 @@ export class GiftCardController {
   }
 
   @Post('gift-cards/check')
-  @ApiOperation({ summary: 'Check gift card balance (public)' })
-  checkGiftCard(@Body('code') code: string) {
-    return this.giftCardService.checkGiftCard(code);
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Check gift card balance (recipient only)' })
+  checkGiftCard(
+    @Request() req: { user: { sub: string } },
+    @Body('code') code: string,
+  ) {
+    return this.giftCardService.checkGiftCard(code, req.user.sub);
   }
 
   @Get('gift-cards/my')
