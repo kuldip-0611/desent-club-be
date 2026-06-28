@@ -306,6 +306,11 @@ export class ProductService {
     const images = uploadedImages;
     const imageColors = this.parseImageColorsJson(dto.imageColors, images.length);
 
+    const gstRate =
+      dto.gstRate !== undefined
+        ? new Prisma.Decimal(dto.gstRate)
+        : await this.resolveDefaultGstDecimal();
+
     // Generate unique slug from name
     const baseSlug = dto.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     let slug = baseSlug;
@@ -327,7 +332,7 @@ export class ProductService {
           color: this.resolveColorInput(dto),
           fabric: '',
           discountPercent: dto.discountPercent ?? null,
-          gstRate: dto.gstRate !== undefined ? new Prisma.Decimal(dto.gstRate) : new Prisma.Decimal(0.05),
+          gstRate,
           categoryId: categoryIdNormalized,
           subcategoryId: subcategoryIdForCreate,
           isAvailable: dto.isAvailable,
@@ -824,6 +829,16 @@ export class ProductService {
     if (!row) {
       throw new BadRequestException('Invalid product category id');
     }
+  }
+
+  private async resolveDefaultGstDecimal(): Promise<Prisma.Decimal> {
+    const row = await this.prisma.storeSetting.findUnique({
+      where: { key: 'defaultGstRate' },
+    });
+    const gstRatePct = Number(row?.value ?? '18');
+    const rate =
+      Number.isFinite(gstRatePct) && gstRatePct >= 0 ? gstRatePct / 100 : 0.18;
+    return new Prisma.Decimal(rate);
   }
 
   private async assertSubcategoryMatchesCategory(
