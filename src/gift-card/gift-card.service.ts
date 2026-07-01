@@ -159,11 +159,6 @@ export class GiftCardService {
     if (card.expiresAt && card.expiresAt < new Date()) throw new BadRequestException('Gift card has expired');
     if (Number(card.balance) <= 0) throw new BadRequestException('Gift card has no remaining balance');
 
-    // The purchaser cannot apply their own gift card (it was meant as a gift)
-    if (card.purchasedById === userId) {
-      throw new BadRequestException('You cannot apply a gift card you purchased. Gift cards are for the recipient only.');
-    }
-
     // Only the intended recipient can apply this gift card
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
     if (!user?.email || user.email.toLowerCase() !== card.recipientEmail.toLowerCase()) {

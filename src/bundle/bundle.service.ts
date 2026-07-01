@@ -33,6 +33,7 @@ const bundleProductSelect = {
     select: {
       id: true,
       name: true,
+      slug: true,
       price: true,
       discountPercent: true,
       images: { take: 1, select: { path: true } },

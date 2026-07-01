@@ -482,10 +482,12 @@ model Order {
   requestedColor        String?     @db.VarChar(100)
   deliveredAt           DateTime?
   cancelledAt           DateTime?
-  shiprocketOrderId String?
-  awbCode           String?
+  shiprocketOrderId   String?
+  shiprocketShipmentId String?
+  awbCode             String?
   courierName       String?
   trackingUrl       String?     @db.Text
+  shippingStatus    String?     // granular Shiprocket status e.g. "PICKED UP", "IN TRANSIT"
   gstRate           Decimal     @default(0.18) @db.Decimal(4, 4)
   cgst              Decimal     @default(0) @db.Decimal(10, 2)
   sgst              Decimal     @default(0) @db.Decimal(10, 2)
@@ -929,4 +931,25 @@ model StoreSetting {
   key       String   @id @db.VarChar(100)
   value     String   @db.Text
   updatedAt DateTime @updatedAt
+}
+
+// ── Admin Audit Log ───────────────────────────────────────────────────────────
+
+model AdminAuditLog {
+  id          String   @id @default(uuid())
+  adminId     String
+  adminName   String   @db.VarChar(200)
+  adminEmail  String   @db.VarChar(200)
+  action      String   @db.VarChar(100)   // e.g. ORDER_STATUS_CHANGED, PRODUCT_CREATED
+  targetType  String   @db.VarChar(50)    // e.g. ORDER, PRODUCT, COUPON, USER
+  targetId    String?  @db.VarChar(200)   // ID of the affected resource
+  targetLabel String?  @db.VarChar(500)   // Human-readable label e.g. "Order #fd8efe29"
+  detail      String?  @db.Text           // JSON with before/after or extra context
+  ipAddress   String?  @db.VarChar(60)
+  createdAt   DateTime @default(now())
+
+  @@index([adminId])
+  @@index([action])
+  @@index([targetType])
+  @@index([createdAt])
 }

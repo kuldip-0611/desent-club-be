@@ -8,6 +8,7 @@ import { buildOrderDeliveredEmail } from './templates/order-delivered.template';
 import { buildRefundProcessedEmail } from './templates/refund-processed.template';
 import { buildReturnApprovedEmail } from './templates/return-approved.template';
 import { buildOrderCancelledEmail } from './templates/order-cancelled.template';
+import { buildShippingStatusUpdateEmail } from './templates/shipping-status-update.template';
 
 @Injectable()
 export class MailService {
@@ -171,6 +172,23 @@ export class MailService {
       `${isExchange ? 'Exchange' : 'Return'} Approved for Order #${ref} | Disent Club`,
       html,
     );
+  }
+
+  // ── Shipping Status Update ────────────────────────────────────────────────────
+
+  async sendShippingStatusUpdate(opts: {
+    to: string;
+    name: string;
+    orderId: string;
+    shippingStatus: string;
+    courierName?: string | null;
+    awbCode?: string | null;
+    trackingUrl?: string | null;
+  }): Promise<void> {
+    const ref = opts.orderId.slice(-8).toUpperCase();
+    const html = buildShippingStatusUpdateEmail({ ...opts, siteUrl: this.siteUrl });
+    const statusLabel = opts.shippingStatus.charAt(0) + opts.shippingStatus.slice(1).toLowerCase();
+    await this.send(opts.to, `Order #${ref} Update: ${statusLabel} | Disent Club`, html);
   }
 
   // ── Order Cancelled ───────────────────────────────────────────────────────────

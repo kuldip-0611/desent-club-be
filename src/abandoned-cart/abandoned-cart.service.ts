@@ -3,14 +3,24 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationService } from '../notification/notification.service';
 
-interface CartItem {
+interface CartLine {
+  lineId: string;
   productId: string;
+  variantId: string;
+  categoryId?: string;
   name: string;
-  quantity: number;
-  unitPrice: number;
+  slug: string;
   image?: string | null;
-  size?: string;
-  color?: string;
+  size: string;
+  color: string;
+  unitPrice: number;
+  quantity: number;
+}
+
+export interface StoredCart {
+  lines: CartLine[];
+  couponCode: string | null;
+  couponDiscount: number;
 }
 
 @Injectable()
@@ -22,52 +32,61 @@ export class AbandonedCartService {
     private readonly notification: NotificationService,
   ) {}
 
-  /** Called from frontend when user (logged-in) updates their cart */
-  async saveCart(userId: string, items: CartItem[]) {
-    if (!items.length) {
+  async loadCart(userId: string): Promise<StoredCart> {
+    const record = await this.prisma.abandonedCart.findUnique({ where: { userId } });
+    if (!record) return { lines: [], couponCode: null, couponDiscount: 0 };
+    const stored = record.items as unknown as StoredCart;
+    // Handle legacy format (array of items before migration)
+    if (Array.isArray(stored)) return { lines: [], couponCode: null, couponDiscount: 0 };
+    return {
+      lines: stored.lines ?? [],
+      couponCode: stored.couponCode ?? null,
+      couponDiscount: stored.couponDiscount ?? 0,
+    };
+  }
+
+  async saveCart(
+    userId: string,
+    lines: CartLine[],
+    couponCode: string | null,
+    couponDiscount: number,
+  ) {
+    const payload: StoredCart = { lines, couponCode, couponDiscount };
+    if (!lines.length) {
       await this.prisma.abandonedCart.deleteMany({ where: { userId } });
       return;
     }
     return this.prisma.abandonedCart.upsert({
       where: { userId },
-      create: { userId, items: items as unknown as any, emailSentAt: null },
-      update: { items: items as unknown as any, emailSentAt: null },
+      create: { userId, items: payload as unknown as any, emailSentAt: null },
+      update: { items: payload as unknown as any, emailSentAt: null },
     });
   }
 
-  /** Called when an order is successfully placed — clear the cart record */
   async clearCart(userId: string) {
     await this.prisma.abandonedCart.deleteMany({ where: { userId } });
   }
 
-  /** Cron: every hour — find carts older than 2h with no email sent → send recovery email */
   @Cron(CronExpression.EVERY_HOUR)
   async processAbandonedCarts() {
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
     const carts = await this.prisma.abandonedCart.findMany({
-      where: {
-        updatedAt: { lte: twoHoursAgo },
-        emailSentAt: null,
-      },
-      include: {
-        user: { select: { id: true, email: true, name: true } },
-      },
+      where: { updatedAt: { lte: twoHoursAgo }, emailSentAt: null },
+      include: { user: { select: { id: true, email: true, name: true } } },
     });
 
     this.logger.log(`Abandoned cart cron: found ${carts.length} carts to process`);
 
     for (const cart of carts) {
       if (!cart.user.email) continue;
-      const items = cart.items as unknown as CartItem[];
+      const stored = cart.items as unknown as StoredCart;
+      const lines: CartLine[] = Array.isArray(stored) ? (stored as unknown as CartLine[]) : (stored.lines ?? []);
+      if (!lines.length) continue;
       try {
         await this.notification.sendAbandonedCartEmail(
           cart.user.email,
           cart.user.name,
-          items.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            unitPrice: i.unitPrice,
-          })),
+          lines.map((l) => ({ name: l.name, quantity: l.quantity, unitPrice: l.unitPrice })),
         );
         await this.prisma.abandonedCart.update({
           where: { id: cart.id },

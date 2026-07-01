@@ -8,6 +8,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
@@ -21,9 +22,12 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import { Request } from 'express';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { ListProductsQueryDto } from './dto/list-products-query.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -36,7 +40,10 @@ import { ProductService } from './product.service';
 @Roles(UserRole.ADMIN)
 @ApiBearerAuth()
 export class ProductController {
-  constructor(private readonly productService: ProductService) {}
+  constructor(
+    private readonly productService: ProductService,
+    private readonly auditLog: AuditLogService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List all products' })
@@ -118,20 +125,38 @@ export class ProductController {
       },
     },
   })
-  create(
+  async create(
+    @Req() req: Request & { user: JwtPayload; ip: string },
     @UploadedFiles() files: Express.Multer.File[],
     @Body() dto: CreateProductDto,
   ) {
-    return this.productService.create(dto, files ?? []);
+    const result = await this.productService.create(dto, files ?? []);
+    void this.auditLog.log({
+      ctx: { adminId: req.user.sub, ipAddress: req.ip },
+      action: 'PRODUCT_CREATED',
+      targetType: 'PRODUCT',
+      targetId: (result as { id?: string })?.id,
+      targetLabel: dto.name,
+    });
+    return result;
   }
 
   @Patch(':id')
   @ApiOperation({ summary: 'Update product fields (JSON)' })
-  update(
+  async update(
+    @Req() req: Request & { user: JwtPayload; ip: string },
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: UpdateProductDto,
   ) {
-    return this.productService.update(id, dto);
+    const result = await this.productService.update(id, dto);
+    void this.auditLog.log({
+      ctx: { adminId: req.user.sub, ipAddress: req.ip },
+      action: 'PRODUCT_UPDATED',
+      targetType: 'PRODUCT',
+      targetId: id,
+      targetLabel: dto.name,
+    });
+    return result;
   }
 
   @Post(':id/images')
@@ -169,11 +194,20 @@ export class ProductController {
 
   @Delete(':id/images/:imageId')
   @ApiOperation({ summary: 'Delete one product image' })
-  removeImage(
+  async removeImage(
+    @Req() req: Request & { user: JwtPayload; ip: string },
     @Param('id', new ParseUUIDPipe()) productId: string,
     @Param('imageId', new ParseUUIDPipe()) imageId: string,
   ) {
-    return this.productService.removeImage(productId, imageId);
+    const result = await this.productService.removeImage(productId, imageId);
+    void this.auditLog.log({
+      ctx: { adminId: req.user.sub, ipAddress: req.ip },
+      action: 'PRODUCT_IMAGE_DELETED',
+      targetType: 'PRODUCT',
+      targetId: productId,
+      detail: { imageId },
+    });
+    return result;
   }
 
   @Patch(':id/images/reorder')
@@ -187,7 +221,17 @@ export class ProductController {
 
   @Delete(':id')
   @ApiOperation({ summary: 'Delete product and its images' })
-  remove(@Param('id', new ParseUUIDPipe()) id: string) {
-    return this.productService.remove(id);
+  async remove(
+    @Req() req: Request & { user: JwtPayload; ip: string },
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    const result = await this.productService.remove(id);
+    void this.auditLog.log({
+      ctx: { adminId: req.user.sub, ipAddress: req.ip },
+      action: 'PRODUCT_DELETED',
+      targetType: 'PRODUCT',
+      targetId: id,
+    });
+    return result;
   }
 }

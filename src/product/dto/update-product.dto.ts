@@ -157,6 +157,7 @@ export class UpdateProductDto {
   @Max(100)
   discountPercent?: number | null;
 
+  @IsOptional()
   @Transform(({ value }) => {
     const n = parseFloat(String(value));
     if (!Number.isFinite(n) || n < 0 || n > 1) return undefined;

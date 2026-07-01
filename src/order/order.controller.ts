@@ -11,6 +11,7 @@ import {
   Post,
   Query,
   RawBodyRequest,
+  Req,
   Request,
   Res,
   UseGuards,
@@ -34,6 +35,8 @@ import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import type { RazorpayWebhookEvent } from './dto/razorpay-webhook.dto';
 import { OrderService } from './order.service';
 import { ShiprocketService } from '../shiprocket/shiprocket.service';
+import { AuditLogService } from '../audit-log/audit-log.service';
+import { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 
 @ApiTags('Orders')
 @ApiBearerAuth()
@@ -44,6 +47,7 @@ export class OrderController {
     private readonly orderService: OrderService,
     private readonly config: ConfigService,
     private readonly shiprocketService: ShiprocketService,
+    private readonly auditLog: AuditLogService,
   ) {}
 
   // ── Public: COD serviceability check ──────────────────────────────────────
@@ -97,9 +101,9 @@ export class OrderController {
   }
 
   /**
-   * GET /webhooks/shiprocket — health check for Shiprocket URL validation
+   * GET /webhooks/tracking — health check for shipping webhook URL validation
    */
-  @Get('webhooks/shiprocket')
+  @Get('webhooks/tracking')
   @Public()
   @HttpCode(200)
   shiprocketWebhookCheck() {
@@ -107,18 +111,24 @@ export class OrderController {
   }
 
   /**
-   * POST /webhooks/shiprocket
-   * Shiprocket calls this when shipment status changes (SHIPPED, DELIVERED, NDR, RTO, etc.)
+   * POST /webhooks/tracking
+   * Shipping carrier calls this when shipment status changes (SHIPPED, DELIVERED, NDR, RTO, etc.)
    */
-  @Post('webhooks/shiprocket')
+  @Post('webhooks/tracking')
   @Public()
   @HttpCode(200)
-  @ApiOperation({ summary: 'Shiprocket webhook receiver (public)' })
+  @ApiOperation({ summary: 'Shipping webhook receiver (public)' })
   async shiprocketWebhook(@Body() body: Record<string, unknown>) {
     await this.orderService.handleShiprocketWebhook(body).catch((err: Error) =>
       console.error('[Shiprocket Webhook] handler error:', err?.message),
     );
     return { received: true };
+  }
+
+  @Post('orders/preview')
+  @ApiOperation({ summary: 'Preview order pricing without creating an order' })
+  previewOrder(@Request() req: { user: { sub: string } }, @Body() dto: CreateOrderDto) {
+    return this.orderService.previewOrder(req.user.sub, dto);
   }
 
   @Post('orders')
@@ -281,12 +291,61 @@ export class OrderController {
     return this.orderService.getOrderById(id);
   }
 
+  @Get('admin/orders/:id/packing-slip')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @ApiOperation({ summary: '[Admin] Download packing slip PDF for an order' })
+  async downloadPackingSlip(@Param('id') id: string, @Res() res: Response) {
+    const pdf = await this.orderService.generatePackingSlipPdf(id);
+    const filename = `packing-slip-${id.slice(-8).toUpperCase()}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdf.length);
+    res.end(pdf);
+  }
+
+  @Get('admin/orders/:id/shipping-label')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @ApiOperation({ summary: '[Admin] Get Shiprocket shipping label URL for an order' })
+  async getShippingLabel(@Param('id') id: string) {
+    const labelUrl = await this.orderService.getShippingLabelUrl(id);
+    return { labelUrl };
+  }
+
+  @Get('admin/orders/:id/generate-label')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @ApiOperation({ summary: '[Admin] Generate shipping label PDF for an order' })
+  async generateShippingLabel(@Param('id') id: string, @Res() res: Response) {
+    const pdf = await this.orderService.generateShippingLabelPdf(id);
+    const filename = `shipping-label-${id.slice(-8).toUpperCase()}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdf.length);
+    res.end(pdf);
+  }
+
   @Patch('admin/orders/:id/status')
   @UseGuards(RolesGuard)
   @Roles('ADMIN')
   @ApiOperation({ summary: '[Admin] Update order status' })
-  updateStatus(@Param('id') id: string, @Body('status') status: OrderStatus) {
-    return this.orderService.updateOrderStatus(id, status);
+  async updateStatus(
+    @Req() req: Request & { user: JwtPayload; ip: string },
+    @Param('id') id: string,
+    @Body('status') status: OrderStatus,
+    @Body('previousStatus') previousStatus?: OrderStatus,
+  ) {
+    const result = await this.orderService.updateOrderStatus(id, status);
+    void this.auditLog.log({
+      ctx: { adminId: req.user.sub, ipAddress: req.ip },
+      action: 'ORDER_STATUS_CHANGED',
+      targetType: 'ORDER',
+      targetId: id,
+      targetLabel: `Order #${id.slice(0, 8).toUpperCase()}`,
+      detail: { from: previousStatus, to: status },
+    });
+    return result;
   }
 
   @Get('admin/returns')
@@ -309,8 +368,21 @@ export class OrderController {
   @UseGuards(RolesGuard)
   @Roles('ADMIN')
   @ApiOperation({ summary: '[Admin] Update return request status' })
-  updateReturn(@Param('id') id: string, @Body() dto: UpdateReturnStatusDto) {
-    return this.orderService.updateReturnStatus(id, dto);
+  async updateReturn(
+    @Req() req: Request & { user: JwtPayload; ip: string },
+    @Param('id') id: string,
+    @Body() dto: UpdateReturnStatusDto,
+  ) {
+    const result = await this.orderService.updateReturnStatus(id, dto);
+    void this.auditLog.log({
+      ctx: { adminId: req.user.sub, ipAddress: req.ip },
+      action: 'RETURN_STATUS_CHANGED',
+      targetType: 'RETURN',
+      targetId: id,
+      targetLabel: `Return #${id.slice(0, 8).toUpperCase()}`,
+      detail: { status: dto.status },
+    });
+    return result;
   }
 
   @Post('admin/returns/:id/mark-refund-paid')
@@ -325,11 +397,21 @@ export class OrderController {
   @UseGuards(RolesGuard)
   @Roles('ADMIN')
   @ApiOperation({ summary: '[Admin] Mark COD order as remitted (cash received from courier)' })
-  markCodRemitted(
+  async markCodRemitted(
+    @Req() req: Request & { user: JwtPayload; ip: string },
     @Param('id') id: string,
     @Body('remittanceRef') remittanceRef?: string,
   ) {
-    return this.orderService.markCodRemitted(id, remittanceRef);
+    const result = await this.orderService.markCodRemitted(id, remittanceRef);
+    void this.auditLog.log({
+      ctx: { adminId: req.user.sub, ipAddress: req.ip },
+      action: 'ORDER_COD_REMITTED',
+      targetType: 'ORDER',
+      targetId: id,
+      targetLabel: `Order #${id.slice(0, 8).toUpperCase()}`,
+      detail: { remittanceRef },
+    });
+    return result;
   }
 
   // ── Bulk Order Management ─────────────────────────────────────────────────
@@ -338,10 +420,19 @@ export class OrderController {
   @UseGuards(RolesGuard)
   @Roles('ADMIN')
   @ApiOperation({ summary: '[Admin] Bulk update order statuses' })
-  bulkUpdateStatus(
+  async bulkUpdateStatus(
+    @Req() req: Request & { user: JwtPayload; ip: string },
     @Body() body: { orderIds: string[]; status: OrderStatus },
   ) {
-    return this.orderService.bulkUpdateOrderStatus(body.orderIds, body.status);
+    const result = await this.orderService.bulkUpdateOrderStatus(body.orderIds, body.status);
+    void this.auditLog.log({
+      ctx: { adminId: req.user.sub, ipAddress: req.ip },
+      action: 'ORDER_BULK_STATUS_CHANGED',
+      targetType: 'ORDER',
+      targetLabel: `${body.orderIds.length} orders → ${body.status}`,
+      detail: { orderIds: body.orderIds, status: body.status },
+    });
+    return result;
   }
 
   @Post('admin/orders/bulk/export')

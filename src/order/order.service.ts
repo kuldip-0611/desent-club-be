@@ -24,6 +24,7 @@ import { LoyaltyService, LOYALTY_RULES } from '../loyalty/loyalty.service';
 import { ReferralService } from '../referral/referral.service';
 import { StoreCreditService } from '../store-credit/store-credit.service';
 import { GiftCardService } from '../gift-card/gift-card.service';
+import { AbandonedCartService } from '../abandoned-cart/abandoned-cart.service';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -55,6 +56,7 @@ export class OrderService {
     private readonly referral: ReferralService,
     private readonly storeCredit: StoreCreditService,
     private readonly giftCard: GiftCardService,
+    private readonly abandonedCart: AbandonedCartService,
   ) {
     this.razorpay = new Razorpay({
       key_id: this.config.getOrThrow<string>('RAZORPAY_KEY_ID'),
@@ -68,6 +70,124 @@ export class OrderService {
 
   private get supportPhoneDisplay(): string {
     return resolveSupportPhoneDisplay(this.config.get<string>('SUPPORT_PHONE_DISPLAY'));
+  }
+
+  async previewOrder(
+    userId: string,
+    dto: Pick<CreateOrderDto, 'items' | 'couponCode' | 'loyaltyPoints' | 'storeCreditAmount' | 'giftCardCode'>,
+  ): Promise<{
+    subtotal: number;
+    couponDiscount: number;
+    shipping: number;
+    gst: number;
+    gstRate: number;
+    loyaltyDiscount: number;
+    storeCreditApplied: number;
+    giftCardDiscount: number;
+    total: number;
+    lineItems: { productId: string; name: string; unitPrice: number; quantity: number; total: number }[];
+  }> {
+    if (!dto.items.length) throw new BadRequestException('Cart is empty');
+
+    const productIds = dto.items.map((i) => i.productId);
+    const products = await this.prisma.product.findMany({ where: { id: { in: productIds } } });
+    if (products.length !== productIds.length) throw new BadRequestException('One or more products not found');
+    const productMap = new Map(products.map((p) => [p.id, p]));
+
+    const now = new Date();
+    const activeFlashSale = await this.prisma.flashSale.findFirst({
+      where: { isActive: true, startsAt: { lte: now }, endsAt: { gte: now } },
+      orderBy: { startsAt: 'desc' },
+    });
+    const flashSaleProductIds: Set<string> = activeFlashSale
+      ? new Set((activeFlashSale.productIds as string[]) ?? [])
+      : new Set();
+    const flashSaleDiscountPct = activeFlashSale ? Number(activeFlashSale.discountPercent) : 0;
+
+    let subtotal = new Prisma.Decimal(0);
+    const lineItems: { productId: string; name: string; unitPrice: number; quantity: number; total: number }[] = [];
+
+    for (const item of dto.items) {
+      const product = productMap.get(item.productId)!;
+      const mrp = Number(product.price);
+      const productDiscountPct = product.discountPercent ? Number(product.discountPercent) : 0;
+      const inFlashSale = flashSaleProductIds.size === 0
+        ? flashSaleDiscountPct > 0
+        : flashSaleProductIds.has(product.id);
+      // Step 1: apply product's own static discount off MRP
+      const staticSalePrice = productDiscountPct > 0
+        ? Math.round(mrp * (100 - productDiscountPct) / 100)
+        : mrp;
+      // Step 2: apply flash sale on top of already-discounted price (matches frontend)
+      const effectiveSalePrice = inFlashSale && flashSaleDiscountPct > 0
+        ? Math.round(staticSalePrice * (100 - flashSaleDiscountPct) / 100)
+        : staticSalePrice;
+      const unitPrice = new Prisma.Decimal(effectiveSalePrice);
+      const itemTotal = unitPrice.mul(item.quantity);
+      subtotal = subtotal.add(itemTotal);
+      lineItems.push({ productId: item.productId, name: product.name, unitPrice: effectiveSalePrice, quantity: item.quantity, total: itemTotal.toNumber() });
+    }
+
+    let couponDiscount = new Prisma.Decimal(0);
+    if (dto.couponCode) {
+      const cartCategoryIds = [...new Set(products.map((p) => p.categoryId).filter((id): id is string => Boolean(id)))];
+      const couponCheck = await this.couponService.validateForSubtotal(dto.couponCode, subtotal.toNumber(), cartCategoryIds, userId);
+      if (couponCheck.valid) couponDiscount = new Prisma.Decimal(couponCheck.discountAmount);
+    }
+
+    const taxable = Prisma.Decimal.max(subtotal.sub(couponDiscount), new Prisma.Decimal(0));
+    const storeSettings = await this.prisma.storeSetting.findMany({
+      where: { key: { in: ['freeShippingThreshold', 'shippingFee', 'defaultGstRate'] } },
+    });
+    const settingMap = Object.fromEntries(storeSettings.map((s) => [s.key, s.value]));
+    const freeShippingThreshold = Number(settingMap['freeShippingThreshold'] ?? '999');
+    const shippingFee = Number(settingMap['shippingFee'] ?? '99');
+    const gstRatePct = Number(settingMap['defaultGstRate'] ?? '18');
+    const gstRate = gstRatePct / 100;
+    const afterDiscount = subtotal.sub(couponDiscount);
+    const shipping = freeShippingThreshold > 0 && afterDiscount.gte(freeShippingThreshold)
+      ? new Prisma.Decimal(0)
+      : new Prisma.Decimal(shippingFee);
+    const gst = this.calculateGst(taxable, gstRate).igst;
+    let total = taxable.add(shipping).add(gst);
+
+    let loyaltyDiscount = new Prisma.Decimal(0);
+    if (dto.loyaltyPoints && dto.loyaltyPoints >= LOYALTY_RULES.minRedeemPoints) {
+      const loyaltyBalance = await this.loyalty.getBalance(userId);
+      const safePoints = Math.min(dto.loyaltyPoints, loyaltyBalance);
+      const maxDiscount = total.mul(LOYALTY_RULES.maxRedeemPercent / 100);
+      const potentialDiscount = new Prisma.Decimal(safePoints * LOYALTY_RULES.rupeePerPoint);
+      loyaltyDiscount = Prisma.Decimal.min(potentialDiscount, maxDiscount, total);
+      total = Prisma.Decimal.max(total.sub(loyaltyDiscount), new Prisma.Decimal(0));
+    }
+
+    let storeCreditApplied = new Prisma.Decimal(0);
+    if (dto.storeCreditAmount && dto.storeCreditAmount > 0) {
+      const creditBalance = await this.storeCredit.getBalance(userId);
+      const requested = new Prisma.Decimal(dto.storeCreditAmount);
+      storeCreditApplied = Prisma.Decimal.min(requested, new Prisma.Decimal(creditBalance), total);
+      total = Prisma.Decimal.max(total.sub(storeCreditApplied), new Prisma.Decimal(0));
+    }
+
+    let giftCardDiscount = new Prisma.Decimal(0);
+    if (dto.giftCardCode) {
+      const gcResult = await this.giftCard.applyToOrder(dto.giftCardCode, total.toNumber());
+      giftCardDiscount = new Prisma.Decimal(gcResult.discountAmount);
+      total = Prisma.Decimal.max(total.sub(giftCardDiscount), new Prisma.Decimal(0));
+    }
+
+    return {
+      subtotal: subtotal.toNumber(),
+      couponDiscount: couponDiscount.toNumber(),
+      shipping: shipping.toNumber(),
+      gst: gst.toNumber(),
+      gstRate,
+      loyaltyDiscount: loyaltyDiscount.toNumber(),
+      storeCreditApplied: storeCreditApplied.toNumber(),
+      giftCardDiscount: giftCardDiscount.toNumber(),
+      total: total.toNumber(),
+      lineItems,
+    };
   }
 
   async createOrder(
@@ -96,6 +216,17 @@ export class OrderService {
     }
 
     const productMap = new Map(products.map((p) => [p.id, p]));
+
+    // Resolve active flash sale to apply its discount (same logic as frontend)
+    const now = new Date();
+    const activeFlashSale = await this.prisma.flashSale.findFirst({
+      where: { isActive: true, startsAt: { lte: now }, endsAt: { gte: now } },
+      orderBy: { startsAt: 'desc' },
+    });
+    const flashSaleProductIds: Set<string> = activeFlashSale
+      ? new Set((activeFlashSale.productIds as string[]) ?? [])
+      : new Set();
+    const flashSaleDiscountPct = activeFlashSale ? Number(activeFlashSale.discountPercent) : 0;
 
     // Collect all variant IDs so we can do a single query
     const variantIds = dto.items.map((i) => i.variantId).filter((id): id is string => Boolean(id));
@@ -145,7 +276,21 @@ export class OrderService {
 
     for (const item of dto.items) {
       const product = productMap.get(item.productId)!;
-      const unitPrice = product.price;
+      // Compute effective sale price — matches frontend product-card logic
+      const mrp = Number(product.price);
+      const productDiscountPct = product.discountPercent ? Number(product.discountPercent) : 0;
+      const inFlashSale = flashSaleProductIds.size === 0
+        ? flashSaleDiscountPct > 0  // sale applies to all products when productIds list is empty
+        : flashSaleProductIds.has(product.id);
+      // Step 1: product's own static discount off MRP
+      const staticSalePrice = productDiscountPct > 0
+        ? Math.round(mrp * (100 - productDiscountPct) / 100)
+        : mrp;
+      // Step 2: flash sale applied on top of already-discounted price (matches frontend)
+      const effectiveSalePrice = inFlashSale && flashSaleDiscountPct > 0
+        ? Math.round(staticSalePrice * (100 - flashSaleDiscountPct) / 100)
+        : staticSalePrice;
+      const unitPrice = new Prisma.Decimal(effectiveSalePrice);
       const itemTotal = unitPrice.mul(item.quantity);
       subtotal = subtotal.add(itemTotal);
       orderItems.push({
@@ -182,8 +327,20 @@ export class OrderService {
     }
 
     const taxable = Prisma.Decimal.max(subtotal.sub(discountAmount), new Prisma.Decimal(0));
-    const shipping = subtotal.gt(1999) ? new Prisma.Decimal(0) : new Prisma.Decimal(99);
-    const gstBreakup = this.calculateGst(taxable);
+    const storeSettings = await this.prisma.storeSetting.findMany({
+      where: { key: { in: ['freeShippingThreshold', 'shippingFee', 'defaultGstRate'] } },
+    });
+    const settingMap = Object.fromEntries(storeSettings.map((s) => [s.key, s.value]));
+    const freeShippingThreshold = Number(settingMap['freeShippingThreshold'] ?? '999');
+    const shippingFee = Number(settingMap['shippingFee'] ?? '99');
+    // defaultGstRate is stored as a whole number percent (e.g. "5" = 5%), same as frontend
+    const gstRatePct = Number(settingMap['defaultGstRate'] ?? '18');
+    const gstRate = gstRatePct / 100;
+    const afterDiscount = subtotal.sub(discountAmount);
+    const shipping = freeShippingThreshold > 0 && afterDiscount.gte(freeShippingThreshold)
+      ? new Prisma.Decimal(0)
+      : new Prisma.Decimal(shippingFee);
+    const gstBreakup = this.calculateGst(taxable, gstRate);
     const gst = gstBreakup.igst; // inter-state default
     let total = taxable.add(shipping).add(gst);
 
@@ -345,7 +502,7 @@ export class OrderService {
 
       // Admin alert + low-stock check (fire-and-forget)
       this.notification.sendAdminOrderAlert('new_order', order.id, order.user.name, Number(order.total)).catch(() => undefined);
-      this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name }))).catch(() => undefined);
+      this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name, size: i.size, color: i.color }))).catch(() => undefined);
 
       // Track affiliate click if code provided
       if (dto.affiliateCode) {
@@ -386,6 +543,9 @@ export class OrderService {
           text: `Hi ${order.user.name}, your COD OTP for order #${order.id.slice(-8).toUpperCase()} is: ${codOtp}. Share this with the delivery agent.`,
         }).catch((err: Error) => console.error('[COD OTP Mail]', err?.message));
       }
+
+      // Clear the abandoned cart on the server after a successful order
+      this.abandonedCart.clearCart(userId).catch(() => undefined);
 
       return {
         orderId: order.id,
@@ -453,6 +613,9 @@ export class OrderService {
     if (giftCardId && giftCardDiscount.gt(0)) {
       this.giftCard.deductBalance(giftCardId, giftCardDiscount.toNumber()).catch(() => undefined);
     }
+
+    // Clear the abandoned cart on the server after a successful order
+    this.abandonedCart.clearCart(userId).catch(() => undefined);
 
     return {
       orderId: order.id,
@@ -578,7 +741,7 @@ export class OrderService {
 
     // Admin alert + low-stock check
     this.notification.sendAdminOrderAlert('new_order', payment.orderId, order.user.name, Number(order.total)).catch(() => undefined);
-    this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name }))).catch(() => undefined);
+    this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name, size: i.size, color: i.color }))).catch(() => undefined);
 
     // Loyalty: earn points + handle referral reward (fire-and-forget)
     this.loyalty.earnOnOrder(order.userId, payment.orderId, Number(order.total)).catch(() => undefined);
@@ -753,7 +916,7 @@ export class OrderService {
           .catch((err: Error) => console.error('[Mail]', err?.message));
       }
       this.notification.sendAdminOrderAlert('new_order', payment.orderId, order.user.name, Number(order.total)).catch(() => undefined);
-      this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name }))).catch(() => undefined);
+      this.checkLowStockAfterOrder(order.items.map((i) => ({ productId: i.productId, name: i.product.name, size: i.size, color: i.color }))).catch(() => undefined);
 
       console.log(`[Razorpay Webhook] payment.captured — orderId=${payment.orderId} paymentId=${entity.id}`);
     }
@@ -916,12 +1079,25 @@ export class OrderService {
       console.error(`[Loyalty] Failed to reverse points for order ${orderId}:`, err?.message),
     );
 
-    // ── Step 5: push notification ─────────────────────────────────────────────
+    // ── Step 5: push notification + cancellation email ───────────────────────
     const cancelUser = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { fcmToken: true },
+      select: { fcmToken: true, email: true, name: true },
     });
     this.notification.notifyOrderStatusChanged(cancelUser?.fcmToken, orderId, 'CANCELLED');
+
+    if (cancelUser?.email) {
+      this.mail
+        .sendOrderCancelled({
+          to: cancelUser.email,
+          name: cancelUser.name,
+          orderId,
+          reason: cancelReason,
+          total: Number(order.total),
+          paymentMethod: payment?.method === 'COD' ? 'COD' : 'ONLINE',
+        })
+        .catch((err: Error) => console.error('[Mail] Cancel email failed:', err?.message));
+    }
 
     const refundMessage =
       refundMode === 'razorpay'
@@ -1365,15 +1541,20 @@ export class OrderService {
           subTotal: returnItems.reduce((s, i) => s + Number(i.total), 0),
         })
         .then(async ({ shiprocketOrderId, shipmentId }) => {
-          // Try assigning AWB immediately
+          // Assign AWB with pincodes so cheapest courier is selected
           let awbCode = '';
           let courierName = '';
+          const warehousePincode = this.config.get<string>('SHIPROCKET_WAREHOUSE_PINCODE') ?? '';
+          const customerPincode = addr['pincode'] ?? '';
           try {
-            const awb = await this.shiprocket.assignAWB(shipmentId);
+            // For return: pickup=customer, delivery=warehouse (reverse direction)
+            const awb = await this.shiprocket.assignAWB(shipmentId, customerPincode, warehousePincode, false);
             awbCode = awb.awbCode;
             courierName = awb.courierName;
+            // Generate label + schedule pickup
+            this.shiprocket.generateLabel(shipmentId).catch(() => undefined);
+            this.shiprocket.schedulePickup(shipmentId).catch(() => undefined);
           } catch {
-            // AWB assignment can fail if couriers aren't set up — store shipment id only
             awbCode = '';
           }
 
@@ -1626,10 +1807,16 @@ export class OrderService {
         .then(async ({ shiprocketOrderId, shiprocketShipmentId }) => {
           let awbCode = '';
           let courierName = '';
+          const warehousePincode = this.config.get<string>('SHIPROCKET_WAREHOUSE_PINCODE') ?? '';
+          const customerPincode = addr['pincode'] ?? '';
           try {
-            const awb = await this.shiprocket.assignAWB(shiprocketShipmentId);
+            // For exchange forward: pickup=warehouse, delivery=customer
+            const awb = await this.shiprocket.assignAWB(shiprocketShipmentId, warehousePincode, customerPincode, false);
             awbCode = awb.awbCode;
             courierName = awb.courierName;
+            // Generate label + schedule pickup
+            this.shiprocket.generateLabel(shiprocketShipmentId).catch(() => undefined);
+            this.shiprocket.schedulePickup(shiprocketShipmentId).catch(() => undefined);
           } catch {
             awbCode = '';
           }
@@ -1879,7 +2066,7 @@ export class OrderService {
       include: {
         payment: true,
         items: { include: { product: true } },
-        user: true,
+        user: { select: { id: true, name: true, email: true, phone: true, fcmToken: true } },
       },
     });
     if (!order) throw new NotFoundException('Order not found');
@@ -1937,6 +2124,17 @@ export class OrderService {
         this.mail
           .sendOrderDelivered({ to: statusUser.email, name: order.user.name, orderId })
           .catch((err: Error) => console.error('[Mail]', err?.message));
+      } else if (status === OrderStatus.CANCELLED) {
+        this.mail
+          .sendOrderCancelled({
+            to: statusUser.email,
+            name: order.user.name,
+            orderId,
+            reason: 'Your order has been cancelled by our team. Please contact support for more details.',
+            total: Number(order.total),
+            paymentMethod: order.payment?.method === 'COD' ? 'COD' : 'ONLINE',
+          })
+          .catch((err: Error) => console.error('[Mail]', err?.message));
       }
     }
 
@@ -1950,6 +2148,12 @@ export class OrderService {
     if (status === OrderStatus.SHIPPED && order.shiprocketOrderId) {
       this.assignShiprocketAWB(orderId, order.shiprocketOrderId).catch((err) =>
         console.error('[Shiprocket] assignAWB failed:', err?.message),
+      );
+    }
+
+    if (status === OrderStatus.CANCELLED) {
+      this.loyalty.reverseOrderPoints(order.userId, orderId).catch((err: Error) =>
+        console.error('[Loyalty] Failed to reverse points on admin cancel:', err?.message),
       );
     }
 
@@ -2020,7 +2224,7 @@ export class OrderService {
       where: { id: order.id },
       data: {
         shiprocketOrderId,
-        // store shipment id temporarily in trackingUrl until AWB is assigned
+        shiprocketShipmentId,
         trackingUrl: `sr_shipment:${shiprocketShipmentId}`,
       },
     });
@@ -2028,6 +2232,24 @@ export class OrderService {
     console.log(
       `[Shiprocket] Order created — shiprocketOrderId=${shiprocketOrderId} shipmentId=${shiprocketShipmentId}`,
     );
+
+    // Auto-assign cheapest AWB immediately and advance to SHIPPED
+    // But bail out if order was cancelled while we were pushing to Shiprocket
+    const freshOrder = await this.prisma.order.findUnique({ where: { id: order.id }, select: { status: true } });
+    if (freshOrder?.status === OrderStatus.CANCELLED) {
+      console.log(`[Shiprocket] Order ${order.id} was cancelled during push — cancelling SR order ${shiprocketOrderId}`);
+      this.shiprocket.cancelOrder(shiprocketOrderId).catch(() => undefined);
+      return;
+    }
+
+    try {
+      await this.assignShiprocketAWB(order.id, shiprocketOrderId);
+      // Do NOT advance to SHIPPED here — status stays PROCESSING.
+      // Shiprocket webhook will advance to SHIPPED when courier actually picks up.
+      console.log(`[Shiprocket] AWB assigned for order ${order.id} — awaiting courier pickup via webhook`);
+    } catch (err) {
+      console.error('[Shiprocket] Auto AWB assignment failed — admin can retry by setting SHIPPED:', (err as Error)?.message);
+    }
   }
 
   private async assignShiprocketAWB(
@@ -2037,12 +2259,19 @@ export class OrderService {
     // Retrieve the stored shipment id
     const dbOrder = await this.prisma.order.findUnique({
       where: { id: orderId },
-      select: { trackingUrl: true, shippingAddress: true, payment: { select: { method: true } } },
+      select: {
+        trackingUrl: true,
+        shippingAddress: true,
+        shiprocketShipmentId: true,
+        payment: { select: { method: true } },
+      },
     });
 
-    const shipmentId = dbOrder?.trackingUrl?.startsWith('sr_shipment:')
-      ? dbOrder.trackingUrl.replace('sr_shipment:', '')
-      : shiprocketOrderId;
+    // Prefer shiprocketShipmentId from DB; fall back to order_id only if absent
+    const shipmentId = dbOrder?.shiprocketShipmentId
+      ?? (dbOrder?.trackingUrl?.startsWith('sr_shipment:')
+        ? dbOrder.trackingUrl.replace('sr_shipment:', '')
+        : shiprocketOrderId);
 
     const addr = (dbOrder?.shippingAddress ?? {}) as Record<string, string>;
     const deliveryPincode = addr['pincode'] ?? '';
@@ -2054,12 +2283,32 @@ export class OrderService {
 
     await this.prisma.order.update({
       where: { id: orderId },
-      data: { awbCode, courierName, trackingUrl },
+      data: {
+        awbCode,
+        courierName,
+        trackingUrl,
+        // Ensure shipmentId is stored — may have been null if createOrder didn't return it
+        shiprocketShipmentId: shipmentId,
+      },
     });
 
     console.log(
       `[Shiprocket] AWB assigned — awb=${awbCode} courier=${courierName}`,
     );
+
+    console.log(`[Shiprocket] Using shipmentId=${shipmentId} for label + pickup (orderId=${orderId})`);
+
+    // Auto-generate label (makes it "Ready to Ship" in Shiprocket dashboard)
+    this.shiprocket.generateLabel(shipmentId).catch((err) =>
+      console.error('[Shiprocket] Label generation failed:', (err as Error)?.message),
+    );
+
+    // Auto-schedule pickup for next day 10:00 AM
+    this.shiprocket.schedulePickup(shipmentId)
+      .then(() => console.log(`[Shiprocket] Pickup scheduled for shipmentId=${shipmentId}`))
+      .catch((err) =>
+        console.error('[Shiprocket] Pickup scheduling failed for shipmentId=' + shipmentId + ':', (err as Error)?.message),
+      );
   }
 
   /** Admin manually marks a COD order as remitted */
@@ -2135,6 +2384,7 @@ export class OrderService {
         awbCode: true,
         courierName: true,
         trackingUrl: true,
+        shippingStatus: true,
       },
     });
     if (!order) throw new NotFoundException('Order not found');
@@ -2157,6 +2407,7 @@ export class OrderService {
       awbCode: order.awbCode,
       courierName: order.courierName,
       trackingUrl: safeTrackingUrl,
+      shippingStatus: order.shippingStatus ?? null,
       shiprocketTracking,
     };
   }
@@ -2187,15 +2438,29 @@ export class OrderService {
     }
 
     // Shiprocket status → our OrderStatus map
+    // PICKUP SCHEDULED / READY TO SHIP = still PROCESSING (warehouse hasn't handed to courier yet)
+    // SHIPPED / IN TRANSIT / OUT FOR DELIVERY = SHIPPED (courier has it)
     const statusMap: Record<string, OrderStatus> = {
-      'SHIPPED': OrderStatus.SHIPPED,
-      'IN TRANSIT': OrderStatus.SHIPPED,
-      'OUT FOR DELIVERY': OrderStatus.SHIPPED,
-      'DELIVERED': OrderStatus.DELIVERED,
-      'RTO INITIATED': OrderStatus.SHIPPED,
-      'RTO DELIVERED': OrderStatus.CANCELLED,  // item returned to sender
-      'CANCELLED': OrderStatus.CANCELLED,
-      'NDR': OrderStatus.SHIPPED,              // Non-Delivery Report — still in transit
+      // ── Stage 1: Warehouse / pre-dispatch → PROCESSING ──────────────────
+      'LABEL GENERATED':    OrderStatus.PROCESSING,
+      'PICKUP SCHEDULED':   OrderStatus.PROCESSING,
+      'PICKUP GENERATED':   OrderStatus.PROCESSING,
+      'READY TO SHIP':      OrderStatus.PROCESSING,
+      'PICKED UP':          OrderStatus.PROCESSING, // courier collected from warehouse — not yet in network
+      'PICKUP DONE':        OrderStatus.PROCESSING,
+      'MANIFESTED':         OrderStatus.PROCESSING, // courier hub scanned it in
+
+      // ── Stage 2: In courier network → SHIPPED ───────────────────────────
+      'SHIPPED':            OrderStatus.SHIPPED,    // dispatched from hub
+      'IN TRANSIT':         OrderStatus.SHIPPED,
+      'OUT FOR DELIVERY':   OrderStatus.SHIPPED,
+      'NDR':                OrderStatus.SHIPPED,    // Non-delivery report — still with courier
+      'RTO INITIATED':      OrderStatus.SHIPPED,    // return in transit
+
+      // ── Stage 3: Final states ────────────────────────────────────────────
+      'DELIVERED':          OrderStatus.DELIVERED,
+      'RTO DELIVERED':      OrderStatus.CANCELLED,
+      'CANCELLED':          OrderStatus.CANCELLED,
     };
 
     const newStatus = statusMap[srStatus];
@@ -2206,7 +2471,7 @@ export class OrderService {
 
     const order = await this.prisma.order.findFirst({
       where: { awbCode: awb },
-      select: { id: true, status: true, userId: true },
+      select: { id: true, status: true, userId: true, awbCode: true, courierName: true, trackingUrl: true, shippingStatus: true },
     });
     if (!order) {
       console.warn(`[Shiprocket Webhook] No order found for AWB ${awb}`);
@@ -2218,11 +2483,27 @@ export class OrderService {
       PENDING: 0, CONFIRMED: 1, PROCESSING: 2, SHIPPED: 3, DELIVERED: 4, CANCELLED: 5, REFUNDED: 6,
     };
     if ((statusRank[newStatus] ?? 0) <= (statusRank[order.status] ?? 0)) {
-      console.log(`[Shiprocket Webhook] Status "${srStatus}" ≤ current "${order.status}" — skipping`);
+      // Even if order status doesn't change, always save the granular shippingStatus
+      await this.prisma.order.update({ where: { id: order.id }, data: { shippingStatus: srStatus } });
+      console.log(`[Shiprocket Webhook] shippingStatus updated to "${srStatus}" (order status unchanged)`);
+      // Send email for meaningful granular status changes even when order status is unchanged
+      if (srStatus !== order.shippingStatus) {
+        const userForEmail = await this.prisma.user.findUnique({ where: { id: order.userId }, select: { email: true, name: true } });
+        if (userForEmail?.email) {
+          const safeUrl = order.trackingUrl?.startsWith('sr_shipment:') ? null : order.trackingUrl;
+          this.mail.sendShippingStatusUpdate({
+            to: userForEmail.email, name: userForEmail.name, orderId: order.id,
+            shippingStatus: srStatus, courierName: order.courierName, awbCode: order.awbCode, trackingUrl: safeUrl,
+          }).catch((err: Error) => console.error('[Mail] Shipping status email failed:', err?.message));
+        }
+      }
       return;
     }
 
-    const updateData: Prisma.OrderUpdateInput = { status: newStatus };
+    const updateData: Prisma.OrderUpdateInput = {
+      status: newStatus,
+      shippingStatus: srStatus, // always store granular Shiprocket status
+    };
     if (newStatus === OrderStatus.DELIVERED) updateData.deliveredAt = new Date();
     if (newStatus === OrderStatus.CANCELLED) updateData.cancelledAt = new Date();
 
@@ -2239,10 +2520,22 @@ export class OrderService {
     });
     this.notification.notifyOrderStatusChanged(user?.fcmToken, order.id, newStatus);
 
-    if (user?.email && newStatus === OrderStatus.DELIVERED) {
-      this.mail
-        .sendOrderDelivered({ to: user.email, name: user.name, orderId: order.id })
-        .catch((err: Error) => console.error('[Mail]', err?.message));
+    if (user?.email) {
+      const safeUrl = order.trackingUrl?.startsWith('sr_shipment:') ? null : order.trackingUrl;
+      const latestCourier = String(body['courier_name'] ?? '').trim() || order.courierName;
+      const latestAwb = order.awbCode;
+
+      if (newStatus === OrderStatus.DELIVERED) {
+        this.mail
+          .sendOrderDelivered({ to: user.email, name: user.name, orderId: order.id })
+          .catch((err: Error) => console.error('[Mail]', err?.message));
+      } else {
+        // Send granular shipping status email for all other meaningful transitions
+        this.mail.sendShippingStatusUpdate({
+          to: user.email, name: user.name, orderId: order.id,
+          shippingStatus: srStatus, courierName: latestCourier, awbCode: latestAwb, trackingUrl: safeUrl,
+        }).catch((err: Error) => console.error('[Mail] Shipping status email failed:', err?.message));
+      }
     }
 
     console.log(`[Shiprocket Webhook] Order ${order.id} → ${newStatus} (AWB ${awb} / "${srStatus}")`);
@@ -2650,18 +2943,34 @@ export class OrderService {
   // ─── Inventory Alert Helper ───────────────────────────────────────────────
 
   private async checkLowStockAfterOrder(
-    items: { productId: string; name: string }[],
+    items: { productId: string; name: string; size: string; color: string }[],
   ): Promise<void> {
     const LOW_STOCK_THRESHOLD = 5;
     for (const item of items) {
-      const product = await this.prisma.product.findUnique({
-        where: { id: item.productId },
+      const variant = await this.prisma.productVariant.findFirst({
+        where: { productId: item.productId, size: item.size, color: item.color },
         select: { quantity: true },
       });
-      if (product && product.quantity <= LOW_STOCK_THRESHOLD) {
-        await this.notification.sendAdminLowStockAlert(item.name, product.quantity);
+      if (variant && variant.quantity <= LOW_STOCK_THRESHOLD) {
+        const label = [item.size, item.color].filter(Boolean).join(' / ');
+        await this.notification.sendAdminLowStockAlert(`${item.name} (${label})`, variant.quantity);
       }
     }
+  }
+
+  // ─── Shipping Label ───────────────────────────────────────────────────────
+
+  async getShippingLabelUrl(orderId: string): Promise<string> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { shiprocketShipmentId: true, shiprocketOrderId: true },
+    });
+    // shiprocketShipmentId can be null if Shiprocket returned the same ID as order_id — fall back to order_id
+    const shipmentId = order?.shiprocketShipmentId ?? order?.shiprocketOrderId;
+    if (!shipmentId) {
+      throw new BadRequestException('No Shiprocket shipment found for this order');
+    }
+    return this.shiprocket.getLabelUrl(shipmentId);
   }
 
   // ─── GST Helper ───────────────────────────────────────────────────────────
@@ -3189,5 +3498,429 @@ export class OrderService {
 
     const csv = [header, ...rows].join('\n');
     return { csv, count: orders.length };
+  }
+
+  // ─── Admin Packing Slip PDF ────────────────────────────────────────────────
+
+  async generatePackingSlipPdf(orderId: string): Promise<Buffer> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          include: { product: { select: { name: true, images: true } } },
+        },
+        payment: true,
+        user: { select: { name: true, email: true, phone: true } },
+      },
+    });
+    if (!order) throw new Error('Order not found');
+
+    const addr = (order.shippingAddress ?? {}) as Record<string, string>;
+    const ref = order.id.slice(-8).toUpperCase();
+    const dateStr = new Date(order.createdAt).toLocaleDateString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric',
+    });
+    const isCod = order.payment?.method === 'COD';
+    const isPaid = order.payment?.status === 'PAID';
+
+    // Pull AWB / courier from DB
+    const orderAny = order as unknown as Record<string, unknown>;
+    const awbCode: string = (orderAny['awbCode'] as string | null) ?? '';
+    const courierName: string = (orderAny['courierName'] as string | null) ?? '';
+
+    // Fetch logo
+    let logoBuffer: Buffer | null = null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const https = require('https') as typeof import('https');
+      logoBuffer = await new Promise<Buffer>((res, rej) => {
+        const chunks: Buffer[] = [];
+        https.get(
+          'https://desent-club-dev-assets-382720393179-ap-southeast-2-an.s3.ap-southeast-2.amazonaws.com/brand/logo.png',
+          (response) => {
+            response.on('data', (c: Buffer) => chunks.push(c));
+            response.on('end', () => res(Buffer.concat(chunks)));
+            response.on('error', rej);
+          },
+        ).on('error', rej);
+      });
+    } catch { logoBuffer = null; }
+
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const PDFDocument = require('pdfkit') as typeof import('pdfkit');
+
+    return new Promise<Buffer>((resolve, reject) => {
+      // Smaller page: 100mm × 150mm (like a courier label)
+      const doc = new PDFDocument({ size: [283, 425], margin: 0, autoFirstPage: true });
+      const chunks: Buffer[] = [];
+      doc.on('data', (c: Buffer) => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const W = 283;
+      const H = 425;
+      const M = 14;
+      const IW = W - M * 2;
+
+      const dark = '#0f172a';
+      const white = '#ffffff';
+      const slate = '#475569';
+      const muted = '#94a3b8';
+      const line = '#cbd5e1';
+      const accent = '#4f46e5';
+      const red = '#dc2626';
+
+      // ── 1. Top header bar ──────────────────────────────────────────────────
+      doc.rect(0, 0, W, 52).fill(dark);
+
+      if (logoBuffer) {
+        try { doc.image(logoBuffer, M, 8, { height: 36, fit: [100, 36] }); } catch {
+          doc.fillColor(white).font('Helvetica-Bold').fontSize(13).text('DISENT CLUB', M, 18);
+        }
+      } else {
+        doc.fillColor(white).font('Helvetica-Bold').fontSize(13).text('DISENT CLUB', M, 18);
+      }
+
+      // Order ref top-right
+      doc.fillColor(white).font('Helvetica-Bold').fontSize(9)
+        .text(`#${ref}`, M, 10, { width: IW, align: 'right' });
+      doc.fillColor(muted).font('Helvetica').fontSize(7)
+        .text(dateStr, M, 22, { width: IW, align: 'right' });
+
+      // ── 2. COD badge (prominent if COD) ────────────────────────────────────
+      let y = 60;
+      if (isCod) {
+        doc.rect(M, y, IW, 22).fill(red);
+        doc.fillColor(white).font('Helvetica-Bold').fontSize(10)
+          .text(`COD — COLLECT ₹${Number(order.total).toFixed(2)}`, M, y + 6, { width: IW, align: 'center' });
+        y += 30;
+      } else {
+        doc.rect(M, y, IW, 18).fill('#14532d');
+        doc.fillColor(white).font('Helvetica-Bold').fontSize(8)
+          .text(isPaid ? 'PREPAID — DO NOT COLLECT PAYMENT' : 'PREPAID', M, y + 5, { width: IW, align: 'center' });
+        y += 26;
+      }
+
+      // ── 3. TO section (delivery address) ──────────────────────────────────
+      const sectionLabel = (txt: string, yy: number) => {
+        doc.fillColor(muted).font('Helvetica').fontSize(7).text(txt, M, yy);
+      };
+
+      sectionLabel('SHIP TO', y);
+      y += 11;
+      const toName = addr['fullName'] ?? order.user.name ?? '';
+      const toPhone = addr['phone'] ?? order.user.phone ?? '';
+      doc.fillColor(dark).font('Helvetica-Bold').fontSize(10).text(toName, M, y, { width: IW });
+      y += 14;
+      if (toPhone) {
+        doc.fillColor(slate).font('Helvetica').fontSize(8).text(toPhone, M, y);
+        y += 12;
+      }
+      const addrLine = [
+        addr['line1'], addr['line2'], addr['city'],
+        addr['state'], addr['pincode'], addr['country'] ?? 'India',
+      ].filter(Boolean).join(', ');
+      doc.fillColor(dark).font('Helvetica').fontSize(8.5).text(addrLine, M, y, { width: IW });
+      y += doc.heightOfString(addrLine, { width: IW }) + 8;
+
+      // Divider
+      doc.moveTo(M, y).lineTo(W - M, y).strokeColor(line).lineWidth(0.5).stroke();
+      y += 8;
+
+      // ── 4. FROM section (warehouse / return address) ───────────────────────
+      const warehouseName = this.config.get<string>('SHIPROCKET_WAREHOUSE_NAME') ?? 'Disent Club';
+      const warehouseAddr = [
+        this.config.get<string>('SHIPROCKET_WAREHOUSE_ADDRESS'),
+        this.config.get<string>('SHIPROCKET_WAREHOUSE_CITY'),
+        this.config.get<string>('SHIPROCKET_WAREHOUSE_STATE'),
+        this.config.get<string>('SHIPROCKET_WAREHOUSE_PINCODE'),
+      ].filter(Boolean).join(', ');
+
+      sectionLabel('RETURN TO (FROM)', y);
+      y += 11;
+      doc.fillColor(dark).font('Helvetica-Bold').fontSize(8).text(warehouseName, M, y);
+      y += 11;
+      if (warehouseAddr) {
+        doc.fillColor(slate).font('Helvetica').fontSize(7.5).text(warehouseAddr, M, y, { width: IW });
+        y += doc.currentLineHeight() * 2 + 8;
+      }
+
+      // Divider
+      doc.moveTo(M, y).lineTo(W - M, y).strokeColor(line).lineWidth(0.5).stroke();
+      y += 8;
+
+      // ── 5. Items list ──────────────────────────────────────────────────────
+      sectionLabel('ITEMS', y);
+      y += 11;
+      for (const item of order.items) {
+        const label = `${item.product.name}${item.size ? ' · ' + item.size : ''}${(item as unknown as Record<string, unknown>)['color'] ? ' · ' + String((item as unknown as Record<string, unknown>)['color']) : ''}`;
+        const qtyPrice = `${item.quantity} × ₹${Number(item.unitPrice).toFixed(2)}`;
+        doc.fillColor(dark).font('Helvetica').fontSize(8).text(label, M, y, { width: IW * 0.72 });
+        doc.fillColor(slate).font('Helvetica').fontSize(8).text(qtyPrice, M, y, { width: IW, align: 'right' });
+        y += 13;
+        if (y > H - 70) break; // safety — don't overflow
+      }
+
+      // Divider
+      doc.moveTo(M, y).lineTo(W - M, y).strokeColor(line).lineWidth(0.5).stroke();
+      y += 8;
+
+      // ── 6. Totals ──────────────────────────────────────────────────────────
+      const totalRow = (label: string, value: string, bold = false) => {
+        const fnt = bold ? 'Helvetica-Bold' : 'Helvetica';
+        doc.fillColor(dark).font(fnt).fontSize(bold ? 9 : 8)
+          .text(label, M, y).text(value, M, y, { width: IW, align: 'right' });
+        y += 13;
+      };
+      totalRow('Subtotal', `₹${Number(order.subtotal).toFixed(2)}`);
+      if (Number(order.discountAmount) > 0) {
+        totalRow('Discount', `-₹${Number(order.discountAmount).toFixed(2)}`);
+      }
+      totalRow('ORDER TOTAL', `₹${Number(order.total).toFixed(2)}`, true);
+
+      // Divider
+      doc.moveTo(M, y).lineTo(W - M, y).strokeColor(line).lineWidth(0.5).stroke();
+      y += 8;
+
+      // ── 7. AWB / Courier ───────────────────────────────────────────────────
+      if (awbCode) {
+        doc.fillColor(muted).font('Helvetica').fontSize(7).text('AWB / TRACKING', M, y);
+        y += 11;
+        doc.fillColor(accent).font('Helvetica-Bold').fontSize(10).text(awbCode, M, y);
+        if (courierName) {
+          doc.fillColor(slate).font('Helvetica').fontSize(8).text(courierName, M + 2, y + 13);
+        }
+        y += 28;
+      }
+
+      // ── 8. Footer ──────────────────────────────────────────────────────────
+      doc.rect(0, H - 22, W, 22).fill(dark);
+      doc.fillColor(muted).font('Helvetica').fontSize(6.5)
+        .text('Thank you for shopping with Disent Club  •  support@disentclub.com', M, H - 14, { width: IW, align: 'center' });
+
+      doc.end();
+    });
+  }
+
+  // ─── Admin Shipping Label PDF ──────────────────────────────────────────────
+
+  async generateShippingLabelPdf(orderId: string): Promise<Buffer> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: { include: { product: { select: { name: true } } } },
+        payment: true,
+        user: { select: { name: true, email: true, phone: true } },
+      },
+    });
+    if (!order) throw new Error('Order not found');
+
+    const storeRows = await this.prisma.storeSetting.findMany();
+    const settings = Object.fromEntries(storeRows.map((r) => [r.key, r.value]));
+
+    const addr = (order.shippingAddress ?? {}) as Record<string, string>;
+    const orderAny = order as unknown as Record<string, unknown>;
+    const awbCode = (orderAny['awbCode'] as string | null) ?? '';
+    const courierName = (orderAny['courierName'] as string | null) ?? 'Courier Service';
+
+    const sellerName = settings['sellerName'] ?? settings['storeName'] ?? 'Disent Club';
+    const sellerAddress = settings['sellerAddress'] ?? '';
+    const sellerCity = settings['sellerCity'] ?? '';
+    const sellerState = settings['sellerState'] ?? '';
+    const sellerPincode = settings['sellerPincode'] ?? '';
+    const sellerPhone = settings['sellerPhone'] ?? settings['supportPhone'] ?? '';
+    const customerCarePhone = settings['customerCarePhone'] ?? settings['supportPhone'] ?? '';
+    const customerEmail = settings['supportEmail'] ?? '';
+    const gstin = settings['gstin'] ?? '';
+
+    const isCod = order.payment?.method === 'COD';
+    const paymentType = isCod ? 'COD' : 'PREPAID';
+    const orderDate = new Date(order.createdAt).toLocaleDateString('en-IN', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+    });
+    const invoiceNo = `Retail${order.id.slice(-5).toUpperCase()}`;
+    const collectableAmount = isCod ? parseFloat(order.total.toString()).toFixed(2) : '0';
+
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const bwipjs = require('bwip-js') as typeof import('bwip-js');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const PDFDocument = require('pdfkit') as typeof import('pdfkit');
+
+    let awbBarcodeBuffer: Buffer | null = null;
+    let orderBarcodeBuffer: Buffer | null = null;
+
+    if (awbCode) {
+      try {
+        awbBarcodeBuffer = (await bwipjs.toBuffer({
+          bcid: 'code128', text: awbCode, scale: 2, height: 14, includetext: false,
+        })) as unknown as Buffer;
+      } catch { /* barcode generation is best-effort */ }
+    }
+
+    try {
+      orderBarcodeBuffer = (await bwipjs.toBuffer({
+        bcid: 'code128', text: orderId.replace(/-/g, '').slice(0, 20), scale: 2, height: 10, includetext: false,
+      })) as unknown as Buffer;
+    } catch { /* barcode generation is best-effort */ }
+
+    return new Promise<Buffer>((resolve, reject) => {
+      const doc = new PDFDocument({ size: 'A4', margin: 0, autoFirstPage: true });
+      const chunks: Buffer[] = [];
+      doc.on('data', (c: Buffer) => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const W = 595.28;
+      const M = 18;
+      const IW = W - M * 2;
+      const BLACK = '#000000';
+      const DGRAY = '#888888';
+      const THEAD = '#eeeeee';
+
+      let y = M;
+
+      // ── Section 1: Ship To ──────────────────────────────────────────────────
+      const sec1H = 105;
+      doc.rect(M, y, IW, sec1H).stroke(BLACK);
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(BLACK).text('Ship To', M + 8, y + 8);
+
+      const shipName = addr['fullName'] ?? order.user.name ?? '';
+      const shipLine1 = [addr['line1'], addr['line2']].filter(Boolean).join(', ');
+      const shipCity = addr['city'] ?? '';
+      const shipState = addr['state'] ?? '';
+      const shipPincode = addr['pincode'] ?? '';
+      const shipPhone = addr['phone'] ?? order.user.phone ?? '';
+
+      doc.font('Helvetica-Bold').fontSize(11).text(shipName, M + 8, y + 22);
+      doc.font('Helvetica').fontSize(9).fillColor(BLACK);
+      doc.text(shipLine1, M + 8, y + 38, { width: IW * 0.6 - 8 });
+      doc.text(`${shipCity}, ${shipState}, India`, M + 8, y + 52);
+      doc.text(shipPincode, M + 8, y + 64);
+      doc.text(shipPhone, M + 8, y + 76);
+
+      y += sec1H;
+
+      // ── Section 2: Shipping details + AWB barcode ───────────────────────────
+      const sec2H = 120;
+      const midX = M + IW * 0.55;
+      doc.rect(M, y, IW, sec2H).stroke(BLACK);
+      doc.moveTo(midX, y).lineTo(midX, y + sec2H).stroke(BLACK);
+
+      doc.font('Helvetica').fontSize(8).fillColor(BLACK);
+      const leftX = M + 8;
+      doc.text(`Dimensions: 25x20x5`, leftX, y + 8);
+      doc.text(`Payment: ${paymentType}`, leftX, y + 22);
+      doc.text(`Order Total: ₹${parseFloat(order.total.toString()).toFixed(2)}`, leftX, y + 36);
+      doc.text(`Weight: 0.5 kg`, leftX, y + 50);
+      doc.text(`EWaybill No:`, leftX, y + 64);
+      doc.text(`Routing code: N/A`, leftX, y + 78);
+      doc.text(`RTO Routing code: NA`, leftX, y + 92);
+
+      const rightX = midX + 8;
+      const rightW = IW - (midX - M) - 16;
+      doc.font('Helvetica-Bold').fontSize(9).text(courierName, rightX, y + 8, { width: rightW });
+      if (awbCode) {
+        doc.font('Helvetica').fontSize(7.5).text(`AWB: ${awbCode}`, rightX, y + 24);
+      }
+      if (awbBarcodeBuffer) {
+        doc.image(awbBarcodeBuffer, rightX, y + 38, { width: rightW - 4, height: 55 });
+      }
+
+      y += sec2H;
+
+      // ── Section 3: Shipped By + order barcode ──────────────────────────────
+      const sec3H = 120;
+      doc.rect(M, y, IW, sec3H).stroke(BLACK);
+      doc.moveTo(midX, y).lineTo(midX, y + sec3H).stroke(BLACK);
+
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(DGRAY)
+        .text('Shipped By (if undelivered, return to)', leftX, y + 8);
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(BLACK).text(sellerName, leftX, y + 22);
+      doc.font('Helvetica').fontSize(8.5).fillColor(BLACK);
+      const sellerMid = midX - M - 16;
+      if (sellerAddress) doc.text(sellerAddress, leftX, y + 36, { width: sellerMid });
+      const cityStateStr = [sellerCity, sellerState].filter(Boolean).join(', ');
+      if (cityStateStr) doc.text(cityStateStr, leftX, y + 58);
+      if (sellerPincode) doc.text(sellerPincode, leftX, y + 70);
+      if (sellerPhone) doc.text(sellerPhone, leftX, y + 82);
+      if (customerCarePhone) doc.text(`Customer Care: ${customerCarePhone}`, leftX, y + 94);
+      if (customerEmail) doc.text(`Customer Email: ${customerEmail}`, leftX, y + 106);
+
+      doc.font('Helvetica').fontSize(7).fillColor(BLACK)
+        .text(`Order#: ${orderId}`, rightX, y + 8, { width: rightW });
+      if (orderBarcodeBuffer) {
+        doc.image(orderBarcodeBuffer, rightX, y + 22, { width: rightW - 4, height: 35 });
+      }
+      doc.fontSize(7.5);
+      doc.text(`Invoice No. ${invoiceNo}`, rightX, y + 64);
+      doc.text(`Invoice Date: ${orderDate}`, rightX, y + 76);
+      doc.text(`Order Date: ${orderDate}`, rightX, y + 88);
+      if (gstin) doc.text(`GSTIN: ${gstin}`, rightX, y + 100);
+
+      y += sec3H;
+
+      // ── Section 4: Items table ──────────────────────────────────────────────
+      const thH = 20;
+      doc.rect(M, y, IW, thH).fillAndStroke(THEAD, BLACK);
+      doc.fillColor(BLACK).font('Helvetica-Bold').fontSize(8);
+
+      const cols: { label: string; x: number; w: number }[] = [
+        { label: 'Item', x: leftX, w: 120 },
+        { label: 'SKU', x: M + 130, w: 88 },
+        { label: 'Qty', x: M + 220, w: 32 },
+        { label: 'Price', x: M + 254, w: 68 },
+        { label: 'HSN', x: M + 324, w: 52 },
+        { label: 'Taxable Value', x: M + 378, w: 88 },
+        { label: 'Total', x: M + 468, w: 88 },
+      ];
+      for (const col of cols) {
+        doc.text(col.label, col.x, y + 6);
+      }
+      y += thH;
+
+      const rowH = 22;
+      for (const item of order.items) {
+        doc.rect(M, y, IW, rowH).stroke(BLACK);
+        doc.font('Helvetica').fontSize(8).fillColor(BLACK);
+        const itemName = item.product?.name ?? 'Product';
+        const sku = (item as unknown as Record<string, unknown>)['variantId'] as string ?? item.productId ?? '';
+        const itemPrice = parseFloat((item as unknown as Record<string, unknown>)['price']?.toString() ?? item.unitPrice?.toString() ?? '0');
+        const taxable = itemPrice * item.quantity;
+        doc.text(itemName.length > 16 ? itemName.slice(0, 16) + '…' : itemName, cols[0].x, y + 7, { width: cols[0].w - 4 });
+        doc.text(sku.toString().slice(0, 12), cols[1].x, y + 7, { width: cols[1].w - 4 });
+        doc.text(item.quantity.toString(), cols[2].x, y + 7);
+        doc.text(`₹${itemPrice.toFixed(2)}`, cols[3].x, y + 7);
+        doc.text('', cols[4].x, y + 7);
+        doc.text(`₹${taxable.toFixed(2)}`, cols[5].x, y + 7);
+        doc.text(`₹${taxable.toFixed(2)}`, cols[6].x, y + 7);
+        y += rowH;
+      }
+
+      // ── Section 5: Totals ──────────────────────────────────────────────────
+      const totalsH = 28;
+      doc.rect(M, y, IW, totalsH).stroke(BLACK);
+      doc.font('Helvetica').fontSize(8).fillColor(BLACK);
+      doc.text('Platform Fee: ₹0', leftX, y + 4);
+      doc.text('Shipping Charges: ₹0', leftX, y + 16);
+      doc.text('Discount: ₹0', M + 320, y + 4);
+      doc.text(`Collectable Amount: ₹${collectableAmount}`, M + 320, y + 16);
+      y += totalsH;
+
+      // ── Section 6: Disclaimer ─────────────────────────────────────────────
+      const disclaimerH = 38;
+      doc.rect(M, y, IW, disclaimerH).stroke(BLACK);
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(BLACK).text(
+        'All disputes are subject to Gujarat Jurisdiction only. Goods once sold will only be taken back or exchanged as per store\'s exchange and return policy',
+        leftX, y + 6, { width: IW - 16 },
+      );
+      y += disclaimerH;
+
+      // ── Section 7: Auto-generated note ───────────────────────────────────
+      doc.rect(M, y, IW, 22).stroke(BLACK);
+      doc.font('Helvetica').fontSize(7.5).fillColor(DGRAY)
+        .text('This is an auto generated label and does not require any signature.', leftX, y + 7);
+
+      doc.end();
+    });
   }
 }

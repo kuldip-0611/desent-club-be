@@ -197,6 +197,7 @@ export class NotificationService {
 
   async sendAdminLowStockAlert(productName: string, qty: number): Promise<void> {
     const adminEmail = this.configService.get<string>('ADMIN_ALERT_EMAIL');
+    const extraEmail = this.configService.get<string>('ADMIN_ALERT_EMAIL_2');
     if (!adminEmail) return;
     const subject = `⚠️ Low stock alert: ${productName}`;
     const text = `Product "${productName}" has only ${qty} unit(s) remaining. Please restock soon.`;
@@ -204,6 +205,11 @@ export class NotificationService {
     this.send(adminEmail, subject, text, html).catch((err) =>
       this.logger.error(`Low stock alert failed: ${err}`),
     );
+    if (extraEmail) {
+      this.send(extraEmail, subject, text, html).catch((err) =>
+        this.logger.error(`Low stock alert (extra) failed: ${err}`),
+      );
+    }
   }
 
   async sendAdminOrderAlert(

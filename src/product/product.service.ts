@@ -206,7 +206,7 @@ export class ProductService {
       query.stockStatus === 'OUT_OF_STOCK'
         ? { quantity: 0 }
         : query.stockStatus === 'LOW_STOCK'
-        ? { quantity: { gt: 0, lte: 5 } }
+        ? { variants: { some: { quantity: { gt: 0, lte: 5 } } } }
         : query.stockStatus === 'IN_STOCK'
         ? { quantity: { gt: 5 } }
         : {};

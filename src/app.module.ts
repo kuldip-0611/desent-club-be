@@ -33,6 +33,7 @@ import { CancellationReasonModule } from './cancellation-reason/cancellation-rea
 import { StoreCreditModule } from './store-credit/store-credit.module';
 import { GiftCardModule } from './gift-card/gift-card.module';
 import { ReviewsModule } from './reviews/reviews.module';
+import { AuditLogModule } from './audit-log/audit-log.module';
 
 @Module({
   imports: [
@@ -70,6 +71,7 @@ import { ReviewsModule } from './reviews/reviews.module';
     StoreCreditModule,
     GiftCardModule,
     ReviewsModule,
+    AuditLogModule,
   ],
   controllers: [AppController],
   providers: [

@@ -144,13 +144,22 @@ export class ShiprocketService implements OnModuleInit {
     };
 
     const { data } = await this.http.post<{
-      order_id: number;
-      shipment_id: number;
+      order_id?: number;
+      shipment_id?: number;
+      payload?: { order_id?: number; shipment_id?: number };
     }>('/orders/create/adhoc', body, { headers });
 
+    // Shiprocket sometimes wraps in a payload object; handle both shapes
+    const orderId = data?.order_id ?? data?.payload?.order_id;
+    const shipmentId = data?.shipment_id ?? data?.payload?.shipment_id;
+
+    this.logger.log(`[Shiprocket] createOrder raw → order_id=${orderId} shipment_id=${shipmentId}`);
+
+    if (!orderId) throw new Error(`Shiprocket createOrder returned no order_id. Raw: ${JSON.stringify(data)}`);
+
     return {
-      shiprocketOrderId: String(data.order_id),
-      shiprocketShipmentId: String(data.shipment_id),
+      shiprocketOrderId: String(orderId),
+      shiprocketShipmentId: shipmentId ? String(shipmentId) : String(orderId),
     };
   }
 
@@ -163,17 +172,34 @@ export class ShiprocketService implements OnModuleInit {
   }> {
     const headers = await this.authHeader();
 
-    // Step 1: get recommended courier ID via serviceability
+    // Step 1: get cheapest available courier via serviceability
     let courierId: number | undefined;
     if (pickupPincode && deliveryPincode) {
       try {
         const { data: svc } = await this.http.get<{
-          data?: { shiprocket_recommended_courier_id?: number };
+          data?: {
+            shiprocket_recommended_courier_id?: number;
+            available_courier_companies?: Array<{
+              courier_company_id: number;
+              courier_name: string;
+              rate: number;
+              cod: number;
+            }>;
+          };
         }>(
           `/courier/serviceability/?pickup_postcode=${pickupPincode}&delivery_postcode=${deliveryPincode}&weight=0.5&cod=${isCod ? 1 : 0}`,
           { headers },
         );
-        courierId = svc?.data?.shiprocket_recommended_courier_id ?? undefined;
+        const companies = svc?.data?.available_courier_companies ?? [];
+        // Filter by COD capability if needed, then pick lowest rate
+        const eligible = isCod ? companies.filter((c) => c.cod === 1) : companies;
+        if (eligible.length > 0) {
+          const cheapest = eligible.reduce((min, c) => (c.rate < min.rate ? c : min), eligible[0]);
+          courierId = cheapest.courier_company_id;
+          this.logger.log(`[Shiprocket] Cheapest courier: ${cheapest.courier_name} @ ₹${cheapest.rate} (id=${courierId})`);
+        } else {
+          courierId = svc?.data?.shiprocket_recommended_courier_id ?? undefined;
+        }
       } catch {
         // fall through — assign without courier_id
       }
@@ -365,6 +391,35 @@ export class ShiprocketService implements OnModuleInit {
     };
   }
 
+  // ─── Schedule Pickup ──────────────────────────────────────────────────────────
+
+  /**
+   * Schedules a courier pickup for the given shipment.
+   * @param shipmentId  Shiprocket shipment_id (not order_id)
+   * @param pickupDate  Date string "YYYY-MM-DD HH:MM" — defaults to next day 10:00 AM
+   */
+  async schedulePickup(shipmentId: string, pickupDate?: string): Promise<void> {
+    const headers = await this.authHeader();
+
+    // Default: next calendar day — Shiprocket accepts YYYY-MM-DD only
+    if (!pickupDate) {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const yyyy = tomorrow.getFullYear();
+      const mm = String(tomorrow.getMonth() + 1).padStart(2, '0');
+      const dd = String(tomorrow.getDate()).padStart(2, '0');
+      pickupDate = `${yyyy}-${mm}-${dd}`;
+    }
+
+    await this.http.post(
+      '/courier/generate/pickup',
+      { shipment_id: [Number(shipmentId)], pickup_date: [pickupDate] },
+      { headers },
+    );
+
+    this.logger.log(`[Shiprocket] Pickup scheduled for shipment ${shipmentId} on ${pickupDate}`);
+  }
+
   // ─── Generate Manifest & Label (optional helpers) ─────────────────────────────
 
   async generateManifest(shiprocketOrderId: string): Promise<void> {
@@ -383,5 +438,17 @@ export class ShiprocketService implements OnModuleInit {
       { shipment_id: [shipmentId] },
       { headers },
     );
+  }
+
+  async getLabelUrl(shipmentId: string): Promise<string> {
+    const headers = await this.authHeader();
+    const { data } = await this.http.post<{ label_url?: string; response?: { label_url?: string } }>(
+      '/courier/generate/label',
+      { shipment_id: [Number(shipmentId)] },
+      { headers },
+    );
+    const url = data?.label_url ?? data?.response?.label_url ?? '';
+    if (!url) throw new Error('Label URL not available — ensure AWB is assigned and pickup is scheduled');
+    return url;
   }
 }

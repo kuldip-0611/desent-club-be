@@ -14,16 +14,31 @@ type ShopVariant = {
 const COLOR_HEX_BY_NAME: Record<string, string> = {
   black: '#111827',
   white: '#f8fafc',
+  blue: '#2563eb',
   navy: '#1e3a8a',
-  charcoal: '#334155',
-  olive: '#4d7c0f',
-  maroon: '#7f1d1d',
   'sky blue': '#0284c7',
-  beige: '#d6d3d1',
+  'royal blue': '#1d4ed8',
+  red: '#dc2626',
+  green: '#16a34a',
+  yellow: '#eab308',
+  orange: '#f97316',
+  pink: '#ec4899',
+  purple: '#7c3aed',
   lavender: '#8b5cf6',
+  lilac: '#c084fc',
+  grey: '#6b7280',
+  gray: '#6b7280',
+  charcoal: '#334155',
+  maroon: '#7f1d1d',
+  olive: '#4d7c0f',
+  beige: '#d6d3d1',
+  cream: '#fef3c7',
   mint: '#10b981',
+  teal: '#0d9488',
   mustard: '#ca8a04',
   coral: '#f97316',
+  brown: '#92400e',
+  'off white': '#fafaf9',
 };
 
 const mapCategorySlug = (slug: string): string => {
@@ -211,6 +226,34 @@ export class ShopService {
           ? ({ price: 'desc' } as const)
           : ({ createdAt: 'desc' } as const);
 
+    // When minRating is set, rating is a computed field so we must fetch all
+    // matching products, attach ratings, filter in-memory, then paginate —
+    // otherwise the DB count is unfiltered and hasNextPage is always wrong.
+    if (minRating !== undefined && minRating > 0) {
+      const allRows = await this.prisma.product.findMany({
+        where,
+        include: {
+          category: { select: { id: true, slug: true, name: true } },
+          subcategory: { select: { slug: true, name: true } },
+          images: { orderBy: { sortOrder: 'asc' } },
+          variants: { include: { catalogSize: { select: { sortOrder: true } } } },
+          productFabrics: { include: { fabric: { select: { name: true } } } },
+        },
+        orderBy,
+      });
+      const allItems = await this.attachReviewStats(allRows.map((row) => this.toShopProduct(row)));
+      const filtered = allItems.filter((p) => p.rating >= minRating);
+      const filteredTotal = filtered.length;
+      const pagedItems = filtered.slice((page - 1) * limit, page * limit);
+      return {
+        items: pagedItems,
+        total: filteredTotal,
+        page,
+        limit,
+        hasNextPage: page * limit < filteredTotal,
+      };
+    }
+
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.product.findMany({
         where,
@@ -228,12 +271,7 @@ export class ShopService {
       this.prisma.product.count({ where }),
     ]);
 
-    let items = await this.attachReviewStats(rows.map((row) => this.toShopProduct(row)));
-
-    // Post-filter by rating (done in-memory since rating is computed)
-    if (minRating !== undefined && minRating > 0) {
-      items = items.filter((p) => p.rating >= minRating);
-    }
+    const items = await this.attachReviewStats(rows.map((row) => this.toShopProduct(row)));
 
     return {
       items,
@@ -302,6 +340,7 @@ export class ShopService {
         rating: r.rating,
         comment: r.comment,
         createdAt: r.createdAt,
+        userId: r.user.id,
         user: { name: r.user.name },
       })),
       total,
@@ -367,7 +406,7 @@ export class ShopService {
     return rows.map((row) => {
       const mrp = Number(row.price);
       const discountPct = row.discountPercent && row.discountPercent >= 1 ? row.discountPercent : null;
-      const salePrice = discountPct ? Math.round(mrp * (100 - discountPct)) / 100 : mrp;
+      const salePrice = discountPct ? Math.round(mrp * (100 - discountPct) / 100) : mrp;
       const compareAtPrice = discountPct ? mrp : undefined;
       return {
         id: row.id,
@@ -417,19 +456,7 @@ export class ShopService {
       href: b.linkUrl ?? '/products',
     });
 
-    // Fall back to category images only for hero if no CMS hero banners
-    const heroBannersOut =
-      heroBanners.length > 0
-        ? heroBanners.map(mapBanner)
-        : categories
-            .filter((c) => Boolean(c.image))
-            .slice(0, 4)
-            .map((c) => ({
-              title: c.name,
-              subtitle: 'Premium essentials curated from live catalog',
-              image: c.image,
-              href: `/products?category=${c.slug}`,
-            }));
+    const heroBannersOut = heroBanners.map(mapBanner);
 
     return {
       banners: heroBannersOut,
@@ -460,7 +487,7 @@ export class ShopService {
     const mrp = Number(row.price);
     // price in DB = MRP (list price). salePrice = MRP after discount.
     const discountPct = row.discountPercent && row.discountPercent >= 1 ? row.discountPercent : null;
-    const salePrice = discountPct ? Math.round(mrp * (100 - discountPct)) / 100 : mrp;
+    const salePrice = discountPct ? Math.round(mrp * (100 - discountPct) / 100) : mrp;
     const compareAtPrice = discountPct ? mrp : undefined;
     const basePrice = salePrice; // kept for compatibility — user panel shows this as the selling price
     const gstRate = row.gstRate !== undefined ? Number(row.gstRate) : 0.18;

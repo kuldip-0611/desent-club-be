@@ -155,7 +155,9 @@ export class CreateProductDto {
   @Max(100)
   discountPercent?: number;
 
+  @IsOptional()
   @Transform(({ value }) => {
+    if (value === undefined || value === null || value === '') return undefined;
     const n = parseFloat(String(value));
     if (!Number.isFinite(n) || n < 0 || n > 1) return undefined;
     return n;
