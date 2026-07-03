@@ -326,6 +326,14 @@ export class OrderController {
     res.end(pdf);
   }
 
+  @Post('admin/orders/:id/retry-shiprocket')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @ApiOperation({ summary: '[Admin] Retry AWB assignment + pickup scheduling for a stuck order' })
+  async retryShiprocket(@Param('id') id: string) {
+    return this.orderService.retryShiprocketAWB(id);
+  }
+
   @Patch('admin/orders/:id/status')
   @UseGuards(RolesGuard)
   @Roles('ADMIN')

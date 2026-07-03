@@ -26,6 +26,7 @@ import { BannerModule } from './banner/banner.module';
 import { FlashSaleModule } from './flash-sale/flash-sale.module';
 import { MailModule } from './mail/mail.module';
 import { BundleModule } from './bundle/bundle.module';
+import { ComboModule } from './combo/combo.module';
 import { StorageModule } from './storage/storage.module';
 import { LoyaltyModule } from './loyalty/loyalty.module';
 import { ReferralModule } from './referral/referral.module';
@@ -67,6 +68,7 @@ import { AuditLogModule } from './audit-log/audit-log.module';
     FlashSaleModule,
     MailModule,
     BundleModule,
+    ComboModule,
     CancellationReasonModule,
     StoreCreditModule,
     GiftCardModule,

@@ -25,6 +25,7 @@ import { ReferralService } from '../referral/referral.service';
 import { StoreCreditService } from '../store-credit/store-credit.service';
 import { GiftCardService } from '../gift-card/gift-card.service';
 import { AbandonedCartService } from '../abandoned-cart/abandoned-cart.service';
+import { ComboService } from '../combo/combo.service';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -57,6 +58,7 @@ export class OrderService {
     private readonly storeCredit: StoreCreditService,
     private readonly giftCard: GiftCardService,
     private readonly abandonedCart: AbandonedCartService,
+    private readonly comboService: ComboService,
   ) {
     this.razorpay = new Razorpay({
       key_id: this.config.getOrThrow<string>('RAZORPAY_KEY_ID'),
@@ -192,7 +194,7 @@ export class OrderService {
 
   async createOrder(
     userId: string,
-    dto: CreateOrderDto,
+    dto: CreateOrderDto & { items: (CreateOrderDto["items"][0] & { _comboPrice?: number })[] },
   ): Promise<{
     orderId: string;
     paymentMethod: 'COD' | 'ONLINE';
@@ -228,12 +230,11 @@ export class OrderService {
       : new Set();
     const flashSaleDiscountPct = activeFlashSale ? Number(activeFlashSale.discountPercent) : 0;
 
-    // Collect all variant IDs so we can do a single query
-    const variantIds = dto.items.map((i) => i.variantId).filter((id): id is string => Boolean(id));
-    const variants = variantIds.length
-      ? await this.prisma.productVariant.findMany({ where: { id: { in: variantIds } } })
-      : [];
-    const variantMap = new Map(variants.map((v) => [v.id, v]));
+    // Fetch ALL variants for the requested products so we can do ID lookup + size/color fallback
+    const allVariants = await this.prisma.productVariant.findMany({
+      where: { productId: { in: productIds } },
+    });
+    const variantMap = new Map(allVariants.map((v) => [v.id, v]));
 
     for (const item of dto.items) {
       const product = productMap.get(item.productId)!;
@@ -244,7 +245,21 @@ export class OrderService {
 
       // Variant-level stock check (if variant specified)
       if (item.variantId) {
-        const variant = variantMap.get(item.variantId);
+        let variant = variantMap.get(item.variantId);
+
+        // Stale variantId (e.g. variant was recreated in admin) — resolve by size+color
+        if (!variant) {
+          const productVariants = allVariants.filter((v) => v.productId === item.productId);
+          variant = productVariants.find(
+            (v) =>
+              v.size?.toLowerCase() === item.size?.toLowerCase() &&
+              (!item.color || v.color?.toLowerCase() === item.color?.toLowerCase()),
+          );
+          if (variant) {
+            item.variantId = variant.id; // update so order items use correct id
+          }
+        }
+
         if (!variant) {
           throw new BadRequestException(`Selected variant for "${product.name}" was not found`);
         }
@@ -400,10 +415,6 @@ export class OrderService {
     const isCod = dto.paymentMethod === 'COD';
 
     if (isCod) {
-      // COD: generate OTP for delivery verification
-      const codOtp = Math.floor(100000 + Math.random() * 900000).toString();
-      const codOtpExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
-
       // COD: skip Razorpay, confirm order immediately
       const order = await this.prisma.order.create({
         data: {
@@ -420,8 +431,6 @@ export class OrderService {
           couponId,
           shippingAddress: shippingAddress ?? Prisma.JsonNull,
           notes: dto.notes,
-          codOtp,
-          codOtpExpiresAt,
           items: { create: orderItems },
           payment: {
             create: {
@@ -534,23 +543,12 @@ export class OrderService {
         this.giftCard.deductBalance(giftCardId, giftCardDiscount.toNumber()).catch(() => undefined);
       }
 
-      // Send OTP via email (fire-and-forget)
-      if (order.user.email) {
-        this.mail.sendRaw({
-          to: order.user.email,
-          subject: `Your COD Delivery OTP for Order #${order.id.slice(-8).toUpperCase()} | Disent Club`,
-          html: `<p>Hi ${order.user.name},</p><p>Your OTP for COD order <strong>#${order.id.slice(-8).toUpperCase()}</strong> is: <strong style="font-size:24px;letter-spacing:4px">${codOtp}</strong></p><p>Share this OTP with the delivery agent to confirm delivery. Valid for 7 days.</p>`,
-          text: `Hi ${order.user.name}, your COD OTP for order #${order.id.slice(-8).toUpperCase()} is: ${codOtp}. Share this with the delivery agent.`,
-        }).catch((err: Error) => console.error('[COD OTP Mail]', err?.message));
-      }
-
       // Clear the abandoned cart on the server after a successful order
       this.abandonedCart.clearCart(userId).catch(() => undefined);
 
       return {
         orderId: order.id,
         paymentMethod: 'COD',
-        codOtp,
         amount: amountPaise,
         currency: 'INR',
       };
@@ -2155,6 +2153,11 @@ export class OrderService {
       this.loyalty.reverseOrderPoints(order.userId, orderId).catch((err: Error) =>
         console.error('[Loyalty] Failed to reverse points on admin cancel:', err?.message),
       );
+      if (order.shiprocketOrderId) {
+        this.shiprocket.cancelOrder(order.shiprocketOrderId).catch((err: Error) =>
+          console.error(`[Shiprocket] Cancel order failed for ${orderId}:`, err?.message),
+        );
+      }
     }
 
     return updated;
@@ -2309,6 +2312,21 @@ export class OrderService {
       .catch((err) =>
         console.error('[Shiprocket] Pickup scheduling failed for shipmentId=' + shipmentId + ':', (err as Error)?.message),
       );
+  }
+
+  /** Admin: retry AWB assignment + pickup for a stuck order that has a Shiprocket order but no AWB */
+  async retryShiprocketAWB(orderId: string) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, shiprocketOrderId: true, shiprocketShipmentId: true, awbCode: true },
+    });
+    if (!order) throw new BadRequestException('Order not found');
+    if (!order.shiprocketOrderId) throw new BadRequestException('No Shiprocket order exists for this order — set status to PROCESSING first');
+    if (order.awbCode) return { message: `AWB already assigned: ${order.awbCode}` };
+
+    await this.assignShiprocketAWB(orderId, order.shiprocketOrderId);
+    const updated = await this.prisma.order.findUnique({ where: { id: orderId }, select: { awbCode: true, courierName: true } });
+    return { message: 'AWB assigned successfully', awbCode: updated?.awbCode, courierName: updated?.courierName };
   }
 
   /** Admin manually marks a COD order as remitted */

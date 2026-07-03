@@ -205,34 +205,41 @@ export class ShiprocketService implements OnModuleInit {
       }
     }
 
-    // Step 2: assign AWB (with courier_id if we got one)
-    const body: Record<string, unknown> = { shipment_id: shipmentId };
-    if (courierId) body['courier_id'] = courierId;
-
-    const { data } = await this.http.post<{
+    // Step 2: assign AWB — try with specific courier_id first, fall back to auto-assign
+    type AwbResponse = {
       awb_assign_status: number;
-      response: {
-        data: {
-          awb_code: string;
-          courier_name: string;
-          applied_weight: number;
-        };
-      };
-    }>(
-      '/courier/assign/awb',
-      body,
-      { headers },
-    );
+      awb_assign_error?: string;
+      response: { data: { awb_code: string; courier_name: string; applied_weight: number } };
+    };
+
+    const tryAssign = async (body: Record<string, unknown>) => {
+      const { data } = await this.http.post<AwbResponse>('/courier/assign/awb', body, { headers });
+      return data;
+    };
+
+    let data = await tryAssign({ shipment_id: shipmentId, ...(courierId ? { courier_id: courierId } : {}) });
+
+    // If specific courier failed, retry without courier_id (let Shiprocket auto-assign)
+    if ((!data?.response?.data?.awb_code || data?.awb_assign_status === 0) && courierId) {
+      this.logger.warn(`[Shiprocket] Courier id=${courierId} AWB failed, retrying with auto-assign`);
+      data = await tryAssign({ shipment_id: shipmentId });
+    }
 
     const awb = data?.response?.data?.awb_code ?? '';
     const courier = data?.response?.data?.courier_name ?? '';
 
+    if (!awb || data?.awb_assign_status === 0) {
+      const reason = data?.awb_assign_error ?? JSON.stringify(data);
+      this.logger.error(`[Shiprocket] AWB assignment failed for shipmentId=${shipmentId}: ${reason}`);
+      throw new Error(`AWB assignment failed: ${reason}`);
+    }
+
+    this.logger.log(`[Shiprocket] AWB assigned: ${awb} via ${courier}`);
+
     return {
       awbCode: awb,
       courierName: courier,
-      trackingUrl: awb
-        ? `https://shiprocket.co/tracking/${awb}`
-        : '',
+      trackingUrl: `https://shiprocket.co/tracking/${awb}`,
     };
   }
 

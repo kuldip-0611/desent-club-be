@@ -751,28 +751,45 @@ export class ProductService {
     return [...map.values()];
   }
 
-  /** When sizeId is set, normalizes `size` to the catalog row’s code and validates the id exists. */
+  /** When sizeId is set, normalizes `size` to the catalog row’s code and validates the id exists.
+   *  For rows without sizeId, auto-matches from catalog by size code so sortOrder is always set. */
   private async resolveVariantRows(rows: VariantRowInput[]): Promise<VariantRowInput[]> {
     const ids = [
       ...new Set(rows.map((r) => r.sizeId).filter((x): x is string => Boolean(x))),
     ];
-    if (ids.length === 0) {
-      return rows;
-    }
-    const sizes = await this.prisma.size.findMany({
-      where: { id: { in: ids } },
-      select: { id: true, code: true },
-    });
-    const byId = new Map(sizes.map((s) => [s.id, s]));
+    // Collect size codes that have no sizeId so we can auto-match them
+    const codesWithoutId = [
+      ...new Set(rows.filter((r) => !r.sizeId).map((r) => r.size.toUpperCase())),
+    ];
+
+    const [byIdSizes, byCodeSizes] = await Promise.all([
+      ids.length > 0
+        ? this.prisma.size.findMany({ where: { id: { in: ids } }, select: { id: true, code: true } })
+        : Promise.resolve([] as { id: string; code: string }[]),
+      codesWithoutId.length > 0
+        ? this.prisma.size.findMany({ where: { code: { in: codesWithoutId } }, select: { id: true, code: true } })
+        : Promise.resolve([] as { id: string; code: string }[]),
+    ]);
+
+    const byId = new Map(byIdSizes.map((s) => [s.id, s]));
+    const byCode = new Map(byCodeSizes.map((s) => [s.code.toUpperCase(), s]));
+
     for (const id of ids) {
       if (!byId.has(id)) {
         throw new BadRequestException(`Unknown catalog size id: ${id}`);
       }
     }
     return rows.map((r) => {
-      if (!r.sizeId) return r;
-      const cat = byId.get(r.sizeId)!;
-      return { size: cat.code, color: r.color, quantity: r.quantity, sizeId: r.sizeId };
+      if (r.sizeId) {
+        const cat = byId.get(r.sizeId)!;
+        return { size: cat.code, color: r.color, quantity: r.quantity, sizeId: r.sizeId };
+      }
+      // Auto-match by size code
+      const matched = byCode.get(r.size.toUpperCase());
+      if (matched) {
+        return { size: matched.code, color: r.color, quantity: r.quantity, sizeId: matched.id };
+      }
+      return r;
     });
   }
 

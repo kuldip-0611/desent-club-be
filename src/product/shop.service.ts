@@ -219,32 +219,36 @@ export class ShopService {
         : {}),
     };
 
-    const orderBy =
-      sort === 'price-low'
-        ? ({ price: 'asc' } as const)
-        : sort === 'price-high'
-          ? ({ price: 'desc' } as const)
-          : ({ createdAt: 'desc' } as const);
+    const isPriceSort = sort === 'price-low' || sort === 'price-high';
+    const orderBy = isPriceSort
+      ? ({ price: sort === 'price-low' ? 'asc' : 'desc' } as const)
+      : ({ createdAt: 'desc' } as const);
 
-    // When minRating is set, rating is a computed field so we must fetch all
-    // matching products, attach ratings, filter in-memory, then paginate —
-    // otherwise the DB count is unfiltered and hasNextPage is always wrong.
-    if (minRating !== undefined && minRating > 0) {
-      const allRows = await this.prisma.product.findMany({
-        where,
-        include: {
-          category: { select: { id: true, slug: true, name: true } },
-          subcategory: { select: { slug: true, name: true } },
-          images: { orderBy: { sortOrder: 'asc' } },
-          variants: { include: { catalogSize: { select: { sortOrder: true } } } },
-          productFabrics: { include: { fabric: { select: { name: true } } } },
-        },
-        orderBy,
-      });
-      const allItems = await this.attachReviewStats(allRows.map((row) => this.toShopProduct(row)));
-      const filtered = allItems.filter((p) => p.rating >= minRating);
-      const filteredTotal = filtered.length;
-      const pagedItems = filtered.slice((page - 1) * limit, page * limit);
+    const productInclude = {
+      category: { select: { id: true, slug: true, name: true } },
+      subcategory: { select: { slug: true, name: true } },
+      images: { orderBy: { sortOrder: 'asc' } as const },
+      variants: { include: { catalogSize: { select: { sortOrder: true } } } },
+      productFabrics: { include: { fabric: { select: { name: true } } } },
+    } as const;
+
+    // Price sorts must use effective sale price (price after discountPercent), not raw price.
+    // minRating also requires in-memory filtering. Both paths fetch all rows and paginate in JS.
+    if (isPriceSort || (minRating !== undefined && minRating > 0)) {
+      const allRows = await this.prisma.product.findMany({ where, include: productInclude });
+      let allItems = await this.attachReviewStats(allRows.map((row) => this.toShopProduct(row)));
+
+      if (isPriceSort) {
+        allItems = allItems.sort((a, b) =>
+          sort === 'price-low' ? a.price - b.price : b.price - a.price,
+        );
+      }
+      if (minRating !== undefined && minRating > 0) {
+        allItems = allItems.filter((p) => p.rating >= minRating);
+      }
+
+      const filteredTotal = allItems.length;
+      const pagedItems = allItems.slice((page - 1) * limit, page * limit);
       return {
         items: pagedItems,
         total: filteredTotal,
@@ -257,13 +261,7 @@ export class ShopService {
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.product.findMany({
         where,
-        include: {
-          category: { select: { id: true, slug: true, name: true } },
-          subcategory: { select: { slug: true, name: true } },
-          images: { orderBy: { sortOrder: 'asc' } },
-          variants: { include: { catalogSize: { select: { sortOrder: true } } } },
-          productFabrics: { include: { fabric: { select: { name: true } } } },
-        },
+        include: productInclude,
         orderBy,
         skip: (page - 1) * limit,
         take: limit,

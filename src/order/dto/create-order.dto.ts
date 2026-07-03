@@ -19,6 +19,11 @@ export class OrderItemDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsString()
+  comboId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsUUID()
   variantId?: string;
 
